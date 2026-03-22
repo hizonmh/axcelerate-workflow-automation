@@ -7,6 +7,10 @@ payments/
 # Internal SOP — company-specific operational procedures
 SOP - Recording Payments in Axcelerate.md
 
+# Input/output CSVs — contain real student data when used
+payments.csv
+payment_report_*.csv
+
 # Python
 __pycache__/
 *.pyc
