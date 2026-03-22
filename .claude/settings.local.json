@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:app.axcelerate.com)",
+      "WebFetch(domain:developer.axcelerate.com)"
+    ]
+  }
+}
