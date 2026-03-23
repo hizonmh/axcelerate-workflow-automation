@@ -4,13 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Repository Is
 
-This is a **Claude AI command library** for automating workflows against the **Axcelerate training management system** REST API. It is not a runnable software project — it contains prompt instructions and Python code templates that Claude generates and users run in their own environments.
+This is a **Claude AI command library and MCP server** for automating workflows against the **Axcelerate training management system** REST API. It contains prompt instructions, Python code templates, and a Model Context Protocol (MCP) server that exposes Axcelerate API operations as tools for any MCP-compatible client (Claude Code, Claude Desktop).
 
 ## Repository Structure
 
 - `.claude/axcelerate_api_reference.md` — Full API reference (68KB). Always consult this first when looking up endpoint paths, parameters, and response shapes.
 - `.claude/commands/*.md` — Nine modular Claude commands, each scoped to one API domain. These are the skills invoked via `/axcelerate-*` commands.
 - `.claude/settings.local.json` — Restricts `WebFetch` to `app.axcelerate.com` and `developer.axcelerate.com` only.
+- `axcelerate-mcp-server/` — MCP server exposing Axcelerate API as tools (see below).
+- `.mcp.json` — Project-level MCP server registration for Claude Code.
 - `.env` — API tokens (gitignored, never committed)
 - `payments/` — Operational payment data and scripts (gitignored, never committed)
 
@@ -102,6 +104,50 @@ Operations must be chained in this order when composing multi-step workflows:
 4. **Invoice** → create/get → yields `INVOICEID` / `invoiceGUID`
 5. **Payment** → record → yields `TRANSACTIONID`
 6. **Email** → send with merge fields from all prior IDs
+
+## MCP Server
+
+The `axcelerate-mcp-server/` directory contains a Python MCP server built with FastMCP that exposes 30+ Axcelerate API operations as tools.
+
+### Setup
+
+```bash
+pip install mcp httpx python-dotenv
+```
+
+### Registration
+
+The server is registered via `.mcp.json` at the project root. Claude Code picks this up automatically. You can also register manually:
+
+```bash
+claude mcp add axcelerate -- python axcelerate-mcp-server/server.py
+```
+
+### Architecture
+
+- **`server.py`** — Single-file server using `mcp.server.fastmcp.FastMCP` with STDIO transport
+- **`requirements.txt`** — Dependencies: `mcp`, `httpx`, `python-dotenv`
+- Uses `httpx.AsyncClient` for async HTTP requests
+- All POST/PUT use form encoding (`data=`), consistent with the API conventions above
+- Reads credentials from `.env` (`AXCELERATE_API_TOKEN`, `AXCELERATE_WS_TOKEN`, `AXCELERATE_BASE_URL`)
+
+### Tool Domains
+
+| Domain | Tools | Examples |
+|--------|-------|---------|
+| Contact | 7 | `create_contact`, `search_contacts`, `verify_usi` |
+| Course | 5 | `list_courses`, `search_instances`, `get_instance_detail` |
+| Enrolment | 4 | `enrol_contact`, `bulk_enrol`, `update_enrolment` |
+| Invoice | 6 | `create_invoice`, `approve_invoice`, `void_invoice` |
+| Payment | 3 | `record_payment`, `list_transactions`, `verify_payment` |
+| Email | 1 | `send_template_email` |
+| Report | 5 | `run_report`, `run_saved_report`, `list_saved_reports` |
+| Catalogue | 2 | `list_catalogue_items`, `get_catalogue_item` |
+| Credit Note | 2 | `create_credit_note`, `list_credit_notes` |
+
+### Resource
+
+- `axcelerate://api-reference` — Exposes the full API reference markdown as a readable MCP resource
 
 ## When Adding or Modifying Commands
 
