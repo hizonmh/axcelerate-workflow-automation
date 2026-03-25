@@ -1,159 +1,205 @@
 # Axcelerate Bank CSV Reconciliation
 
-You are an expert at reconciling raw ANZ bank transaction CSVs for Macallan Education. This is a weekly workflow that transforms bank exports into a reconciled file identifying which student each payment belongs to and what payment method was used.
+You are an expert at reconciling raw bank transaction files from Macallan College bank accounts. You process and reconcile bank CSVs by adding two columns: **Student** (who the payment is for) and **Payment Method** (how it was paid).
 
-## Context
+## Trigger Prompts
 
-Macallan Education operates **7 ANZ bank accounts** across 4 campuses:
-- Adelaide (Adelaide .csv)
-- Brisbane Cheque, Brisbane Prepaid (Brisbane Cheque.csv, Brisbane Prepaid.csv)
-- Perth Cheque, Perth Prepaid (Perth Cheque.csv, Perth Prepaid.csv)
-- Sydney Cheque, Sydney Prepaid (Sydney Cheque.csv, Sydney Prepaid.csv)
-
-Raw bank exports are combined into a single CSV file (typically `payments/CSV_Macallan.csv`) which is then processed by `payments/reconcile_bank_csv.py`.
-
-## How to Run
+Upload your bank CSV file and say any of these:
+- "Reconcile these bank payments"
+- "Process this bank transaction file"
+- "New bank file — please process and reconcile"
 
 $ARGUMENTS
 
-When the user asks to reconcile bank transactions:
-
-1. **Check if a new CSV file was provided.** The input file should be placed at `payments/CSV_Macallan.csv`. If the user specifies a different filename, update the `INPUT_CSV` path in `reconcile_bank_csv.py`.
-
-2. **Run the script:**
-   ```
-   python payments/reconcile_bank_csv.py
-   ```
-
-3. **Review the output** at `payments/CSV_Macallan_reconciled.csv`. Spot-check key rows and flag any "unknown" students for the user to manually identify.
-
-4. **If the user wants to proceed to bulk payment recording**, the reconciled CSV needs to be transformed into the `Macallan_payments.csv` format: `contact_id, date, amount, payment_method, reference`. This is a separate step done after manual review.
-
-## Input CSV Format
+## Input File Structure
 
 | Column | Name | Description |
 |--------|------|-------------|
-| 0 | Source.Name | Bank account name (e.g., "Adelaide .csv") |
-| 1 | Column1 | Transaction date (DD/MM/YYYY or Excel serial number). **If not a date, it's continuation text for the previous row's Column8** |
-| 2 | Column2 | Transaction amount. Positive = incoming, Negative = outgoing |
-| 3 | Column3 | Transaction description (e.g., "PAYMENT FROM JOHN SMITH 12345678") |
-| 4 | Column4 | Payer name. May show `#NAME?` (Excel error from leading dash) or `-` |
-| 5 | Column5 | Payee name (usually a Macallan entity) |
-| 6 | Column6 | (Often empty) |
-| 7 | Column7 | Reference field 1 (often contains student ID or MAC code) |
-| 8 | Column8 | Reference field 2 (free-text reference from payer) |
+| A | Source.Name | Bank account name (e.g., Adelaide.csv, Brisbane Cheque.csv) |
+| B | Column1 | Transaction date (serial number). Non-date data = extra info for previous row |
+| C | Column2 | Transaction amount. **ONLY process positive values** (incoming). Negative = outgoing, skip |
+| D | Column3 | Primary transaction description |
+| E | Column4 | Secondary description (usually payer name) |
+| F | Column5 | Tertiary description (usually Macallan entity name) |
+| G | Column6 | Usually empty |
+| H | Column7 | Additional reference (often student ID or name) |
+| I | Column8 | Additional reference (often fee description or student info) |
 
-### Excel Serial Date Handling
-Some rows have Excel serial date numbers (e.g., `46078`) instead of `DD/MM/YYYY` dates. This happens when Excel auto-converts dates during export. The script detects 5-digit numbers in the 40000–55000 range and converts them to `DD/MM/YYYY` using Excel's epoch (Dec 30, 1899).
+## Output Columns
 
-### Multi-line Row Handling
-Some transactions span multiple CSV rows. When Column1 contains text instead of a date (e.g., "Full name:- Rajesh Kumar Sharma"), it is extra information belonging to the **previous** row's Column8. The script concatenates these automatically.
+### Column J: "Student"
 
-## Output Columns Added
+Extract student identifier using this priority order:
 
-| Column | Name | Description |
-|--------|------|-------------|
-| 9 | Student | Student ID, MAC optional ID, student name, or "unknown" |
-| 10 | Payment Method | Stripe, Direct Debit, Agent Deduction, or Direct Deposit |
+| Priority | Type | Description |
+|----------|------|-------------|
+| 1 | Student ID | 8-digit number starting with 1 (e.g., 12826971). Search ALL columns D–I. |
+| 2 | MAC ID | Format: MAC + 4 digits (e.g., MAC6174). Normalize spaces: "MAC 6174" → "MAC6174" |
+| 3 | Student Name | If no ID found, extract the student's name from context |
+| 4 | Name + Extra Info | If student included DOB or other info (e.g., M. Hassan Raza Khan 20-03-1997), keep it |
+| 5 | "Unknown" | No student info determinable (Ezidebit batches, internal transfers) |
 
-## Student Identification Rules (Column 9)
+### Column K: "Payment Method"
 
-Priority order for identifying the student:
+| Method | How to Identify |
+|--------|----------------|
+| Direct Deposit | Most common. Single person name, no organization. Rounded amounts. Includes ATM deposits labeled "AGENT DEPOSIT" + student ID. Includes family/friends paying for student. |
+| Agent Deduction | Organization name in payer (PTY, LTD, INTERNATIONAL, GROUP, GLOBAL). OR two different names (payer ≠ student). OR TRANSFER FROM [agent] patterns. |
+| Direct Debit | Contains EZIDEBIT in description. |
+| Stripe | Contains STRIPE in description. |
+| Internal Transfer | Contains FUNDS TFER + FROM in description. Transfers between Macallan's own bank accounts. |
 
-### 1. Student ID (8-digit number)
-- Format: 8 digits, typically starting with 11, 12, or 13 (e.g., `12000001`)
-- Search columns 7, 6, 3, 4, 8 in that priority order
-- Can be embedded in text like `SID13000001`, `ID:13000002KUMAR`, `_12000003`, `STDID.13000004PATEL`
-- When multiple IDs found in one column, take the **last match** (student IDs tend to appear after "REF:" keywords, while passport numbers etc. appear earlier)
-- Regex: `(?<!\d)(1[0-9]{7})(?!\d)` — ensures the 8-digit number isn't part of a longer number
+## Critical Rules
 
-### 2. Optional ID (MAC code)
-- Format: `MAC` + 4 digits (e.g., `MAC0001`, `MAC0002`)
-- Students sometimes write with a space: `Mac 0003` → normalised to `MAC0003`
-- Regex: `\bMAC\s?(\d{4})\b` (case-insensitive)
+- **"AGENT DEPOSIT"** = ATM cash deposit by student = **Direct Deposit** (NOT Agent Deduction). Student ID follows immediately after.
+- **#NAME?** in col E: CSV import converts names starting with "-" to #NAME? errors. Extract actual name from col D instead.
+- **7-digit IDs are NOT valid** student IDs. Only 8-digit numbers starting with 1 are valid. Use student name instead.
+- **Embedded IDs**: Student IDs can be embedded without spaces (e.g., 12829372kibet). Use regex `(1\d{7})` to extract.
+- For **Agent Deductions**, Column J shows the **STUDENT** (person being paid for), NOT the payer/agent.
+- Individual persons paying for a **DIFFERENT** student are Agent Deductions (not Direct Deposit) if they are repeat/known agents. Only classify as Direct Deposit if payer is clearly family/friend with no agent history. When in doubt and payer ≠ student, default to Agent Deduction.
+- If col E is a person BUT col F is **NOT** a Macallan entity (e.g., Clear Eyed Pty Ltd) → Agent Deduction.
+- Ezidebit batch transfers and internal transfers: student = "Unknown", needs manual reconciliation.
 
-### 3. Student Name
-- **Direct Deposit**: Use the payer name from Column4 (the student IS the payer)
-- **Agent Deduction**: Check if Column4 (payer) is the agent or the student:
-  - If payer name contains agent keywords, "PTY LTD", or is a proxy payer (different person in references) → payer is the agent/proxy, look for student name in Column7/8 references
-  - If payer name is a person and matches references → payer is the student
-- **Proxy payments**: When Column4 payer name shares no significant words with Column7/8 reference names, the payer is paying for a different student. The student name comes from the reference, not the payer. Examples: RAVI KUMAR paying for "Priya Patel", AMIT VERMA paying for "Deepak Sharma"
-- **Fallback**: Extract name from Column3 using `PAYMENT FROM (?:-\s*)?(.+?)` regex
-- Filter out non-name values: "fees", "fee", "payment", "initial payment", "school", etc.
+## Known Agents & Organizations
 
-### 4. Unknown
-- When no student ID, MAC code, or identifiable name is found
-- These require manual review in the system
+### PAYMENT FROM Agents
 
-## Payment Method Classification Rules (Column 10)
+| Agent Name | Where to Find Student |
+|------------|----------------------|
+| OnePoint | Col H: student name + DOB |
+| Edunetwork PTY LTD | Col I: format NP[amount] - [ref] - [Student Name] |
+| Spot On Global | Col H: student name, Col I: Student ID |
+| EHUB International PTY LTD | Col I: student info |
+| E-COLINK | Col H: student name |
+| DRM | Col H: student name |
+| MigrationArcadia | Col H: student name (remove "Fee Transfer Receipt") |
+| Qualy Pay | Col I: student name (remove "QLY " prefix) |
+| Spark Group International | Col H: student name |
+| Primo Group Australia | Col H: student name |
+| Top Notch Study and Visa | Col I: remove leading numbers and "Macallan fee" |
+| New Era International PTY LTD | Col I: student name |
+| Student Vibes PTY LTD | Col H: student info, ID extractable |
+| Clear Eyed PTY LTD | Appears in Col F (not Macallan). Student in Col I |
+| Vanesa Correa Mejia | Agent with INV reference. Student name in Col H |
+| Ankita Chopra | Agent with inv reference. Student ID in Col I |
+| Ankit Arora | Pays for different students. Student info in Col I |
+| Angela Sthefania Carrasco | Individual agent. Student name in Col I, student ID may need manual lookup. |
+| Justice Fami | Individual agent. Student info in Col H (format: Name-StudentID e.g. Hassan-11439444). Extract student ID after hyphen. |
+| Kiran | Individual agent. Col E may show #NAME? (dash prefix). Student name in Col I (clean fee text e.g. "Nikhil_Fee" → "Nikhil"). |
 
-### 1. Stripe
-- Any column contains "STRIPE" (case-insensitive)
+### TRANSFER FROM Agents
 
-### 2. Direct Debit
-- Any column contains "EZIDEBIT"
-- These are automatic deductions via the Ezidebit payment gateway
+| Agent Name | Where to Find Student |
+|------------|----------------------|
+| Aussizz Migration | Extract ID from ID:[8digits] in col D |
+| Shabbir Iqbal | Student name follows after multiple spaces in col D |
+| CBA | Student ID embedded in col D |
+| G8M8 Great Mate | Student name between agent name and "MACALL" in col D |
 
-### 3. Agent Deduction
-Detected by any of these indicators:
-- **Agent keywords** in any column: MIGRATION, AUSSIZZ, GLOBAL EDUCA, PREMIER EDUCATION, PACIFIC EDUCA, GATEWAY MIGRAT, HORIZON MIGRATION, VISA CONNECT, CROWN INTERNATIONAL, APEX MIGRATION, NOVA ASSIST
-- **PTY LTD** in payer name (Column3 or Column4) — indicates a company/institution paying
-- **TRANSFER FROM** pattern in Column3 (excluding EZIDEBIT transfers)
-- **Proxy payment** — payer name (Column4) is a different person from the name in reference columns (Column7/8). Detected by comparing name words: if the payer and reference share no significant words (after filtering out noise like "fee", "payment", "school" etc.), the payer is paying on behalf of a different student. Requires at least 2 name-like words in the reference to trigger.
-- Typically involves a migration agent, education consultant, or individual paying on behalf of a student
-- Amounts are often non-round numbers (e.g., $615, $668, $1,230)
+## Processing Workflow
 
-**Important**: "AGENT DEPOSIT" in Column3 is NOT an agent payment — it's how ANZ labels ATM cash deposits by students. These are classified as Direct Deposit.
+### Step 1: Read Data
 
-### 4. Direct Deposit (default)
-- Individual student paying directly via bank transfer
-- Usually a single person's name in the transaction
-- Amounts are typically round numbers (e.g., $1,000, $1,500, $2,000)
+Read all rows from the uploaded file/sheet. Identify column structure (should match input format above).
 
-## Non-Student Positive Transactions
+### Step 2: Process Each Row
 
-These are positive amounts that are NOT student fee payments. They are tagged in Column 9 with Column 10 = "N/A":
+For each row with positive amount (Col C > 0):
+1. Combine all description fields (D–I) into searchable text
+2. Determine Payment Method using classification rules
+3. Extract Student Identifier (ID → MAC ID → Name → Name+Info → Unknown)
+4. For negative amounts, leave columns J and K blank
 
-| Pattern in Column3 | Tag |
-|---|---|
-| `ANZ INTERNET BANKING FUNDS TFER` | INTERNAL TRANSFER |
-| `REVERSAL OF DEBIT ENTRY` | REVERSAL |
-| `INVALID CREDIT ACCOUNT` | BOUNCED |
-| `VISA DEBIT DEPOSIT` | MERCHANT REFUND |
+### Step 3: Write Results
 
-## Key Files
+Add headers "Student" (J1) and "Payment Method" (K1) bold. Write all results. Format Col J as text. Auto-fit widths.
+
+### Step 4: Verify & Summarize
+
+Spot-check sample rows across different payment methods and provide a summary report:
+- Total rows, positive (incoming) count, negative/skipped count
+- Breakdown by Payment Method (Direct Deposit, Agent Deduction, Direct Debit, Stripe, Internal Transfer)
+- Breakdown by Student ID type (Student ID, MAC ID, Name, Name+Info, Unknown)
+- Flag "Unknown" rows that need manual review
+
+## Student Name Extraction (for Agent Deductions)
+
+1. Check Col I first — often contains student name or "student name + ID"
+2. Check Col H — sometimes has student info
+3. Clean names by removing fee text: college fees, school fee, tuition, payment, deposit, COE, enrolment, certificate, cert III, advance diploma, installment, etc.
+4. Remove MR, MRS, MS prefixes from names
+5. For TRANSFER FROM patterns: student info appears after multiple spaces following the agent name
+6. For Edunetwork: parse format `NP[amount] - [ref] - [Student Name]` from Col I
+
+## Implementation
+
+Reconciliation is implemented in the **Bank Transaction Tracker** app (`tracker/` directory):
+
+### Key Files
 
 | File | Purpose |
 |------|---------|
-| `payments/reconcile_bank_csv.py` | The reconciliation script |
-| `payments/CSV_Macallan.csv` | Input: raw bank export (replaced weekly) |
-| `payments/CSV_Macallan_reconciled.csv` | Output: enriched with Student + Payment Method |
-| `payments/Macallan_bulk.py` | Downstream: bulk payment recorder (uses reconciled data after manual review) |
-| `payments/Macallan_payments.csv` | Downstream: formatted input for bulk recorder |
+| `tracker/reconciler.py` | Core reconciliation engine — `reconcile_transaction()`, `classify_payment_method()`, `extract_student()` |
+| `tracker/parsers.py` | File parsers — bank CSV (single + combined multi-bank) and Xero Excel. Calls reconciler automatically on import |
+| `tracker/database.py` | SQLite database — stores transactions with deduplication, status tracking, bulk updates |
+| `tracker/app.py` | Streamlit web UI — import files, review/edit reconciled transactions, mark for upload |
+| `bulk_payment.py` | Upstream: reads "OK to Upload" rows from tracker DB and records payments in Axcelerate |
 
-## Common Edge Cases
+### Reconciliation Engine (`tracker/reconciler.py`)
 
-| Scenario | Example | How It's Handled |
-|----------|---------|------------------|
-| `#NAME?` in payer name | Excel error from leading `-` | Treated as invalid, name extracted from Column3 instead |
-| Passport number vs Student ID | `PP NO: A16723660 ... REF: 12000001` | Column-priority search + last-match picks the correct REF |
-| Agent paying for student | `APEX MIGRATION PTY LTD SARAH 13000001` | Agent detected, student ID extracted, classified as Agent Deduction |
-| Student paying via agent reference | `MOHAMMED ALI Premier Education migration` | Payer is NOT an agent → student = MOHAMMED ALI |
-| ID embedded without separator | `SID13000001`, `ID:13000002KUMAR` | Lookaround regex catches IDs not at word boundaries |
-| Multi-line continuation | Row with "Full name:- Rajesh..." in date column | Appended to previous row's Column8 |
-| "Macallan Education Consortium PTY" in Column5 | Payee is Macallan itself | Column5 is never checked for PTY LTD agent detection |
-| ATM deposit labelled "AGENT DEPOSIT" | `AGENT DEPOSIT 12000003` | NOT an agent — ATM label. Classified as Direct Deposit |
-| Person paying for different person | `RAVI KUMAR` paying, ref says `Priya Patel fee` | Proxy detection: no shared name words → Agent Deduction, student = reference name |
-| Person paying for different person with ID | `PRIYA NAIR` paying, ref says `Vikram Singh` | Proxy detected, student ID from Col7 used, Agent Deduction |
-| Proxy with DOB in reference | `AMIT VERMA` paying, ref `Deepak Sharma (01/01/2000)` | Proxy detected, student = "Deepak Sharma (01/01/2000)" |
-| Reference has agent keyword (not proxy) | `MOHAMMED ALI`, ref `Premier Education migration` | Reference contains MIGRATION → skipped by proxy check → student = MOHAMMED ALI |
+The reconciler classifies each incoming transaction by:
+
+1. **Payment Method** (`classify_payment_method()`):
+   - Checks for Stripe, Ezidebit (Direct Debit), FUNDS TFER (Internal Transfer)
+   - Checks known PAYMENT FROM / TRANSFER FROM agents → Agent Deduction
+   - Checks org keywords in payer name (PTY, LTD, etc.) → Agent Deduction
+   - Checks Col F payee (non-Macallan entity) → Agent Deduction
+   - Checks payer ≠ student (different names in payer vs references) → Agent Deduction
+   - Default → Direct Deposit
+
+2. **Student** (`extract_student()`):
+   - Priority 1: 8-digit Student ID (`1\d{7}`) from all columns
+   - Priority 2: MAC ID (`MAC\s?\d{4}`)
+   - Agent Deduction: agent-specific column preference (h/i/hi/d) from `PAYMENT_FROM_AGENTS` dict
+   - Direct Deposit: payer name (cleaned of fee/noise words)
+   - Internal Transfer / Direct Debit: "Unknown"
+
+### Data Flow
+
+```
+Bank CSV / Xero Excel
+    ↓ parsers.py (detect_and_parse)
+    ↓ reconciler.py (auto-classify student + method)
+    ↓ database.py (upsert with dedup)
+    ↓ app.py (Streamlit UI: review, edit, mark "OK to Upload")
+    ↓ bulk_payment.py (upload to Axcelerate API)
+```
+
+### Supported File Formats
+
+| Format | Parser | Description |
+|--------|--------|-------------|
+| Combined bank CSV | `parse_combined_bank_csv()` | Multi-bank merged file with Source.Name header |
+| Single bank CSV | `parse_bank_csv()` | Per-bank CSV (8 columns, no header, DD/MM/YYYY dates) |
+| Xero Excel | `parse_xero_excel()` | Bank Reconciliation export (.xlsx), reads "Bank Statement" tab |
+
+### Transaction Statuses (Tracker)
+
+| Status | Meaning |
+|--------|---------|
+| `Unreconciled` | Newly imported, not yet reviewed |
+| `OK to Upload` | Reviewed and ready for Axcelerate upload |
+| `Axcelerate Updated` | Successfully recorded in Axcelerate |
+| `Unallocated` | Recorded but no matching invoice found |
+| `Check Manually` | Error or needs manual review |
+| `No Action` | Auto-set for Direct Debit, Stripe, Internal Transfer |
 
 ## Updating This Skill
 
 When new patterns are discovered during reconciliation:
-- **New agent names**: Add to `AGENT_KEYWORDS` list in `reconcile_bank_csv.py`
-- **New non-name values**: Add to `NON_NAME_VALUES` set
-- **New non-student transaction types**: Add to `NON_STUDENT_PATTERNS` list
-- **New organisation entity names**: Note that Column5 payee names for the organisation's own entities are not agents — do not trigger agent detection on these
-- **New noise words**: Add to `NAME_NOISE_WORDS` set in `reconcile_bank_csv.py` if payment descriptors cause false proxy detection
+- **New PAYMENT FROM agents**: Add to `PAYMENT_FROM_AGENTS` dict in `tracker/reconciler.py` with column preference (h/i/hi/d)
+- **New TRANSFER FROM agents**: Add to `TRANSFER_FROM_AGENTS` list in `tracker/reconciler.py`
+- **New organisation keywords**: Add to `ORG_KEYWORDS` list
+- **New Macallan entity names**: Add to `MACALLAN_ENTITIES` list (prevents false agent detection)
+- **New fee/noise words**: Add to `FEE_WORDS` set (cleaned from student name extraction)
 - Update this file with the new patterns for future reference

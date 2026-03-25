@@ -4,7 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Repository Is
 
-This is a **Claude AI command library and MCP server** for automating workflows against the **Axcelerate training management system** REST API. It contains prompt instructions, Python code templates, and a Model Context Protocol (MCP) server that exposes Axcelerate API operations as tools for any MCP-compatible client (Claude Code, Claude Desktop).
+This is a **Claude AI command library, MCP server, and automation toolkit** for managing workflows against the **Axcelerate training management system** REST API. It contains:
+
+- **Claude Code skills** (prompt commands) for each API domain
+- A **Model Context Protocol (MCP) server** exposing Axcelerate API as tools for any MCP-compatible client
+- A **Bank Transaction Tracker** (Streamlit web app) for importing, reconciling, and managing bank transactions
+- A **Bulk Payment Uploader** script that reads reconciled transactions from the tracker and records them in Axcelerate
+- A **Reconciliation Engine** that auto-classifies bank transactions by student and payment method
 
 ## Repository Structure
 
@@ -12,9 +18,11 @@ This is a **Claude AI command library and MCP server** for automating workflows 
 - `.claude/commands/*.md` — Nine modular Claude commands, each scoped to one API domain. These are the skills invoked via `/axcelerate-*` commands.
 - `.claude/settings.local.json` — Restricts `WebFetch` to `app.axcelerate.com` and `developer.axcelerate.com` only.
 - `axcelerate-mcp-server/` — MCP server exposing Axcelerate API as tools (see below).
+- `tracker/` — Bank Transaction Tracker app (see below).
+- `bulk_payment.py` — Bulk payment uploader script (see below).
 - `.mcp.json` — Project-level MCP server registration for Claude Code.
 - `.env` — API tokens (gitignored, never committed)
-- `payments/` — Operational payment data and scripts (gitignored, never committed)
+- `payments/` — Operational payment data and legacy scripts (gitignored, never committed)
 
 ## Command Files and Their Domains
 
@@ -148,6 +156,100 @@ claude mcp add axcelerate -- python axcelerate-mcp-server/server.py
 ### Resource
 
 - `axcelerate://api-reference` — Exposes the full API reference markdown as a readable MCP resource
+
+## Bank Transaction Tracker
+
+The `tracker/` directory contains a Streamlit web app for importing, reconciling, and managing bank transactions before uploading them to Axcelerate.
+
+### Components
+
+| File | Purpose |
+|------|---------|
+| `tracker/app.py` | Streamlit UI — import files, filter/search transactions, bulk edit status/student/method |
+| `tracker/database.py` | SQLite database layer — `transactions` table with upsert, bulk update, stats |
+| `tracker/parsers.py` | File parsers — bank CSV (single and combined multi-bank), Xero Excel reconciliation exports |
+| `tracker/reconciler.py` | Reconciliation engine — classifies payment method and extracts student from transaction data |
+| `tracker/requirements.txt` | Dependencies: `streamlit`, `pandas`, `openpyxl` |
+| `tracker/tracker.db` | SQLite database (gitignored — contains real transaction data) |
+
+### How It Works
+
+1. **Import** — Upload bank CSV or Xero Excel files via the Streamlit UI. The parsers auto-detect format, run reconciliation to populate student and payment method, and upsert into SQLite (deduplication by date+amount+payer+account).
+2. **Review** — Filter by status, payment method, bank account, and student. Search across payer names, references, and descriptions. Select rows and bulk-edit student, status, or payment method.
+3. **Mark for Upload** — Set transaction status to "OK to Upload" for rows ready to push to Axcelerate.
+4. **Upload** — Run `bulk_payment.py` to read "OK to Upload" rows from the tracker DB and record them in Axcelerate via the API.
+
+### Transaction Statuses
+
+| Status | Meaning |
+|--------|---------|
+| `Unreconciled` | New import, not yet reviewed |
+| `OK to Upload` | Reviewed and ready for Axcelerate upload |
+| `Axcelerate Updated` | Successfully recorded in Axcelerate (allocated to invoice) |
+| `Unallocated` | Recorded in Axcelerate but no matching invoice found |
+| `Check Manually` | Failed or needs manual intervention |
+| `No Action` | Auto-set for Direct Debit, Stripe, Internal Transfer (handled elsewhere) |
+
+### Running the Tracker
+
+```bash
+cd tracker
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+## Bulk Payment Uploader
+
+`bulk_payment.py` reads transactions with status "OK to Upload" from the tracker SQLite database and records each as a payment in Axcelerate.
+
+### What It Does
+
+1. Loads "OK to Upload" rows from `tracker/tracker.db`
+2. Resolves contact IDs (numeric IDs used directly; MAC IDs looked up via optionalID search)
+3. Searches for a matching invoice (balance == payment amount) across SENT, PARTIAL, and OVERDUE statuses
+4. Records the payment — allocated to invoice if found, otherwise as unallocated credit
+5. Updates tracker row status: `Axcelerate Updated` (allocated), `Unallocated` (no invoice match), or `Check Manually` (error)
+6. Prints a session transaction report and saves a CSV report to `payment_report_YYYYMMDD_HHMMSS.csv`
+
+### Field Mapping (Tracker → Axcelerate)
+
+| Tracker Column | Axcelerate Field |
+|----------------|------------------|
+| `student` | `contactID` (numeric ID or MAC optionalID) |
+| `date` | `transDate` (converted from YYYY-MM-DD to DD/MM/YYYY) |
+| `amount` | `amount` |
+| `payment_method` | `paymentMethodID` (mapped via METHOD_MAP) |
+| `bank_account` | `reference` and `description` |
+
+### Running
+
+```bash
+python bulk_payment.py
+```
+
+## Reconciliation Engine
+
+`tracker/reconciler.py` implements the classification rules from `axcelerate-reconcile.md`:
+
+- **Payment Method Classification**: Direct Deposit, Agent Deduction, Direct Debit, Stripe, Internal Transfer
+- **Student Extraction**: Student ID (8-digit) → MAC ID → Student Name → Unknown
+- **Known Agent Detection**: 25+ agents with column-specific extraction preferences (PAYMENT FROM and TRANSFER FROM patterns)
+
+The reconciler is called automatically by the parsers during import. It can also be invoked directly:
+
+```python
+from reconciler import reconcile_transaction
+
+result = reconcile_transaction(
+    description="PAYMENT FROM ONEPOINT",
+    payer="ONEPOINT",
+    payee="MACALLAN EDUCATION",
+    col_h="John Smith 01-01-2000",
+    col_i="",
+    amount=1500.00,
+)
+# result = {"student": "John Smith 01-01-2000", "payment_method": "Agent Deduction"}
+```
 
 ## When Adding or Modifying Commands
 

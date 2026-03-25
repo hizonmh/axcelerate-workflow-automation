@@ -1,21 +1,24 @@
 """
-Bulk payment recording from CSV — one API transaction per CSV row.
-CSV columns: contact_id, date (DD/MM/YYYY), amount, payment_method, reference
+Bulk payment recording from tracker app — one API transaction per row.
 
-contact_id may be:
-  - A numeric Axcelerate contactID (e.g. 12000001)
-  - An optionalID student code (e.g. MAC0001) — looked up via GET /contacts/search
+Reads transactions with status "OK to Upload" from the tracker SQLite database.
+Field mapping (tracker → Axcelerate):
+  student       → contact_id  (numeric ID or MAC optional ID)
+  date          → trans_date
+  amount        → amount
+  payment_method → payment_method_id
+  bank_account  → reference
 
-For each row, the script:
-  1. Fetches outstanding invoices for the contact
-  2. If exactly one invoice has a balance equal to the payment amount, allocates to it
-  3. Otherwise records the payment as unallocated credit
-
-Handles amounts formatted with commas (e.g. "1,000.00").
+After processing, updates tracker status:
+  Allocated   → "Axcelerate Updated"
+  Unallocated → "Unallocated"
+  Error       → "Check Manually"
 """
 
 import csv
 import os
+import re
+import sqlite3
 from datetime import datetime
 import requests
 from dotenv import load_dotenv
@@ -41,41 +44,79 @@ METHOD_MAP = {
     "agent deduction":  10,
 }
 
-CSV_PATH = os.path.join(os.path.dirname(__file__), "payments.csv")
+# Regex for valid student identifiers (numeric ID or MAC ID)
+MAC_ID_RE = re.compile(r"^MAC\s?\d+$", re.IGNORECASE)
+
+DB_PATH = os.path.join(os.path.dirname(__file__), "tracker", "tracker.db")
+
+# ── LOAD ROWS FROM TRACKER DB ───────────────────────────────────────
+
+print(f"Loading 'OK to Upload' transactions from: {DB_PATH}\n")
+
+conn = sqlite3.connect(DB_PATH)
+conn.row_factory = sqlite3.Row
+rows_raw = conn.execute(
+    "SELECT id, student, date, amount, payment_method, bank_account FROM transactions WHERE status = 'OK to Upload' ORDER BY date"
+).fetchall()
+rows = [dict(r) for r in rows_raw]
+conn.close()
+
+print(f"Found {len(rows)} transaction(s) with status 'OK to Upload'\n")
+
+if not rows:
+    print("Nothing to process. Exiting.")
+    raise SystemExit(0)
+
+# ── PROCESS PAYMENTS ─────────────────────────────────────────────────
 
 transactions = []
 failed_count = 0
 failed_rows  = []
+skipped_rows = []
 
-print(f"Loading payments from: {CSV_PATH}\n")
-
-with open(CSV_PATH, newline="", encoding="utf-8") as f:
-    reader = csv.DictReader(f)
-    rows = [
-        {k.strip(): v for k, v in row.items()}
-        for row in reader
-        if any(v.strip() for v in row.values())
-    ]
+# Track row_id → new status for DB updates
+status_updates = {}  # {tracker_row_id: new_status}
 
 for row in rows:
-    raw_id         = row["contact_id"].strip()
-    raw_date       = row["date"].strip()
-    raw_amount     = row["amount"].strip().replace(",", "").replace("$", "")
-    payment_method = row["payment_method"].strip()
-    reference      = row["reference"].strip()
+    tracker_id     = row["id"]
+    raw_id         = (row["student"] or "").strip()
+    raw_date       = (row["date"] or "").strip()
+    raw_amount     = str(row["amount"]).strip().replace(",", "").replace("$", "")
+    payment_method = (row["payment_method"] or "Direct Deposit").strip()
+    reference      = (row["bank_account"] or "").strip()
 
-    # Parse DD/MM/YYYY from CSV, send as MM/DD/YYYY (API interprets first value as month)
-    dt = datetime.strptime(raw_date, "%d/%m/%Y")
-    trans_date = dt.strftime("%m/%d/%Y")
+    # Validate student field — must be numeric ID or MAC ID
+    if not raw_id or raw_id == "Unknown":
+        skipped_rows.append({"id": tracker_id, "student": raw_id, "amount": raw_amount, "reason": "Empty or Unknown student"})
+        status_updates[tracker_id] = "Check Manually"
+        print(f"SKIP row {tracker_id} | Student='{raw_id}' — not a valid ID, marking 'Check Manually'")
+        continue
+
+    is_numeric = raw_id.isdigit()
+    is_mac_id = bool(MAC_ID_RE.match(raw_id))
+
+    if not is_numeric and not is_mac_id:
+        skipped_rows.append({"id": tracker_id, "student": raw_id, "amount": raw_amount, "reason": "Student is a name, not a resolvable ID"})
+        status_updates[tracker_id] = "Check Manually"
+        print(f"SKIP row {tracker_id} | Student='{raw_id}' — not a numeric/MAC ID, marking 'Check Manually'")
+        continue
+
+    # Parse date from YYYY-MM-DD (DB format) → DD/MM/YYYY for API
+    try:
+        dt = datetime.strptime(raw_date, "%Y-%m-%d")
+    except ValueError:
+        # Try DD/MM/YYYY as fallback
+        dt = datetime.strptime(raw_date, "%d/%m/%Y")
+    trans_date = dt.strftime("%d/%m/%Y")
 
     payment_method_id = METHOD_MAP.get(payment_method.lower(), 4)
     amount = float(raw_amount)
 
-    print(f"Processing {raw_id} | ${raw_amount} | {payment_method} | {reference} | {trans_date}")
+    print(f"Processing row {tracker_id} | {raw_id} | ${amount:.2f} | {payment_method} | {reference} | {trans_date}")
 
     try:
-        # Resolve contact_id: numeric = use directly; non-numeric = look up by optionalID
-        if raw_id.isdigit():
+        # Resolve contact_id: numeric = use directly; MAC ID = look up by optionalID
+        if is_numeric:
             contact_id = int(raw_id)
         else:
             search = requests.get(
@@ -133,6 +174,7 @@ for row in rows:
 
         allocated = "Allocated" if invoice_id else "Unallocated"
         transactions.append({
+            "tracker_id": tracker_id,
             "id":         raw_id,
             "contact_id": contact_id,
             "amount":     tx["AMOUNT"],
@@ -145,44 +187,80 @@ for row in rows:
         })
         print(f"    OK — TRANSACTIONID={tx['TRANSACTIONID']} | Amount={tx['AMOUNT']} | {allocated}")
 
+        # Set tracker status based on allocation
+        if invoice_id:
+            status_updates[tracker_id] = "Axcelerate Updated"
+        else:
+            status_updates[tracker_id] = "Unallocated"
+
     except requests.exceptions.HTTPError as e:
         body = e.response.text if e.response is not None else "(no body)"
         failed_count += 1
-        failed_rows.append({"id": raw_id, "amount": raw_amount, "error": f"{e} | {body}"})
+        failed_rows.append({"tracker_id": tracker_id, "id": raw_id, "amount": raw_amount, "error": f"{e} | {body}"})
+        status_updates[tracker_id] = "Check Manually"
         print(f"  FAILED — {e}")
         print(f"  Response body: {body}")
     except Exception as e:
         failed_count += 1
-        failed_rows.append({"id": raw_id, "amount": raw_amount, "error": str(e)})
+        failed_rows.append({"tracker_id": tracker_id, "id": raw_id, "amount": raw_amount, "error": str(e)})
+        status_updates[tracker_id] = "Check Manually"
         print(f"  FAILED — {e}")
 
+# ── UPDATE TRACKER DB ────────────────────────────────────────────────
+
+if status_updates:
+    print(f"\nUpdating {len(status_updates)} tracker row(s)...")
+    conn = sqlite3.connect(DB_PATH)
+    now = datetime.now().isoformat()
+    for row_id, new_status in status_updates.items():
+        conn.execute(
+            "UPDATE transactions SET status = ?, updated_at = ? WHERE id = ?",
+            (new_status, now, row_id),
+        )
+    conn.commit()
+    conn.close()
+    print("Tracker statuses updated.")
+
 # ── SESSION TRANSACTION REPORT ───────────────────────────────────────
-print("\n" + "=" * 120)
+print("\n" + "=" * 130)
 print("SESSION TRANSACTION REPORT")
-print("=" * 120)
-print(f"{'#':<4} {'ID':<12} {'Contact ID':<12} {'Amount':>10}  {'Method':<18} {'Tx ID':<12} {'Date':<14} {'Invoice':<12} {'Status'}")
-print("-" * 120)
+print("=" * 130)
+print(f"{'#':<4} {'Row':<6} {'ID':<12} {'Contact ID':<12} {'Amount':>10}  {'Method':<18} {'Tx ID':<12} {'Date':<14} {'Invoice':<12} {'Status'}")
+print("-" * 130)
 for i, tx in enumerate(transactions, 1):
     print(
-        f"{i:<4} {tx['id']:<12} {str(tx['contact_id']):<12} "
+        f"{i:<4} {str(tx['tracker_id']):<6} {tx['id']:<12} {str(tx['contact_id']):<12} "
         f"${float(tx['amount']):>9.2f}  {tx['method']:<18} {str(tx['tx_id']):<12} "
         f"{tx['date']:<14} {str(tx.get('invoice_id', '')):<12} {tx.get('status', '')}"
     )
-print("-" * 120)
+print("-" * 130)
 total = sum(float(t["amount"]) for t in transactions)
-print(f"{'TOTAL':<4} {'':<12} {'':<12} ${total:>9.2f}")
+print(f"{'TOTAL':<4} {'':<6} {'':<12} {'':<12} ${total:>9.2f}")
 
 allocated_count = sum(1 for t in transactions if t.get("invoice_id"))
 unallocated_count = len(transactions) - allocated_count
-print(f"\nSuccessful: {len(transactions)}  |  Failed: {failed_count}")
+print(f"\nSuccessful: {len(transactions)}  |  Failed: {failed_count}  |  Skipped: {len(skipped_rows)}")
 print(f"Allocated: {allocated_count}  |  Unallocated: {unallocated_count}")
 
-if failed_rows:
-    print("\nFailed rows:")
-    for fr in failed_rows:
-        print(f"  {fr['id']} | ${fr['amount']} — {fr['error']}")
+if skipped_rows:
+    print("\nSkipped rows (marked 'Check Manually'):")
+    for sr in skipped_rows:
+        print(f"  Row {sr['id']} | Student='{sr['student']}' | ${sr['amount']} — {sr['reason']}")
 
-print("=" * 120)
+if failed_rows:
+    print("\nFailed rows (marked 'Check Manually'):")
+    for fr in failed_rows:
+        print(f"  Row {fr['tracker_id']} | {fr['id']} | ${fr['amount']} — {fr['error']}")
+
+# Status update summary
+print("\nTracker status updates:")
+status_summary = {}
+for new_status in status_updates.values():
+    status_summary[new_status] = status_summary.get(new_status, 0) + 1
+for s, count in sorted(status_summary.items()):
+    print(f"  {s}: {count}")
+
+print("=" * 130)
 
 # ── CSV REPORT ──────────────────────────────────────────────────────
 report_path = os.path.join(
@@ -191,9 +269,9 @@ report_path = os.path.join(
 )
 
 report_fields = [
-    "contact_id_input", "contact_id",
+    "tracker_row_id", "contact_id_input", "contact_id",
     "amount", "payment_method", "transaction_id", "date", "reference",
-    "invoice_id", "status", "error",
+    "invoice_id", "status", "tracker_status", "error",
 ]
 
 with open(report_path, "w", newline="", encoding="utf-8") as f:
@@ -202,6 +280,7 @@ with open(report_path, "w", newline="", encoding="utf-8") as f:
 
     for tx in transactions:
         writer.writerow({
+            "tracker_row_id":   tx["tracker_id"],
             "contact_id_input": tx["id"],
             "contact_id":       tx["contact_id"],
             "amount":           tx["amount"],
@@ -211,11 +290,29 @@ with open(report_path, "w", newline="", encoding="utf-8") as f:
             "reference":        tx.get("reference", ""),
             "invoice_id":       tx.get("invoice_id", ""),
             "status":           tx.get("status", ""),
+            "tracker_status":   status_updates.get(tx["tracker_id"], ""),
             "error":            "",
+        })
+
+    for sr in skipped_rows:
+        writer.writerow({
+            "tracker_row_id":   sr["id"],
+            "contact_id_input": sr["student"],
+            "contact_id":       "",
+            "amount":           sr["amount"],
+            "payment_method":   "",
+            "transaction_id":   "",
+            "date":             "",
+            "reference":        "",
+            "invoice_id":       "",
+            "status":           "Skipped",
+            "tracker_status":   "Check Manually",
+            "error":            sr["reason"],
         })
 
     for fr in failed_rows:
         writer.writerow({
+            "tracker_row_id":   fr["tracker_id"],
             "contact_id_input": fr["id"],
             "contact_id":       "",
             "amount":           fr["amount"],
@@ -224,7 +321,8 @@ with open(report_path, "w", newline="", encoding="utf-8") as f:
             "date":             "",
             "reference":        "",
             "invoice_id":       "",
-            "status":           "",
+            "status":           "Failed",
+            "tracker_status":   "Check Manually",
             "error":            fr["error"],
         })
 

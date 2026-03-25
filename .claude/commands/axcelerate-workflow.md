@@ -99,23 +99,21 @@ import json
 import csv
 import logging
 from datetime import datetime
+from dotenv import load_dotenv
+import os
 
-# ── Configuration ──────────────────────────────────────────────────────────────
-API_TOKEN = "<YOUR_API_TOKEN>"
-WS_TOKEN  = "<YOUR_WS_TOKEN>"
-BASE_URL  = "https://app.axcelerate.com/api"
+load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
 # ── API Client ─────────────────────────────────────────────────────────────────
 class AxcelerateClient:
-    def __init__(self, api_token, ws_token):
-        self.base = BASE_URL
+    def __init__(self):
+        self.base = os.getenv("AXCELERATE_BASE_URL")
         self.headers = {
-            "apitoken": api_token,
-            "wstoken": ws_token,
-            "Content-Type": "application/json"
+            "apitoken": os.getenv("AXCELERATE_API_TOKEN"),
+            "wstoken": os.getenv("AXCELERATE_WS_TOKEN"),
         }
 
     def get(self, path, params=None):
@@ -123,17 +121,19 @@ class AxcelerateClient:
         r.raise_for_status()
         return r.json()
 
-    def post(self, path, data):
-        r = requests.post(f"{self.base}{path}", headers=self.headers, json=data)
+    def post(self, path, data=None):
+        # CRITICAL: Use data= (form encoding), NOT json=
+        r = requests.post(f"{self.base}{path}", headers=self.headers, data=data)
         r.raise_for_status()
         return r.json()
 
-    def put(self, path, data):
-        r = requests.put(f"{self.base}{path}", headers=self.headers, json=data)
+    def put(self, path, data=None):
+        # CRITICAL: Use data= (form encoding), NOT json=
+        r = requests.put(f"{self.base}{path}", headers=self.headers, data=data)
         r.raise_for_status()
         return r.json()
 
-ax = AxcelerateClient(API_TOKEN, WS_TOKEN)
+ax = AxcelerateClient()
 
 # ── Workflow Steps ──────────────────────────────────────────────────────────────
 # Add your workflow logic here using ax.get(), ax.post(), ax.put()
@@ -240,6 +240,40 @@ for e in enrolments:
     log.info(f"Activated {e['LEARNERID']} | Invoice {inv['INVOICEID']}")
 ```
 
+### Workflow E — Bank Reconciliation → Review → Upload to Axcelerate
+
+This is the end-to-end payment processing pipeline using the Bank Transaction Tracker and Bulk Payment Uploader.
+
+```
+Step 1: Import bank files into tracker
+   → Run: cd tracker && streamlit run app.py
+   → Upload bank CSV or Xero Excel files via the UI
+   → Reconciler auto-classifies student + payment method
+
+Step 2: Review and reconcile in tracker UI
+   → Filter by status (Unreconciled), search by name/reference
+   → Select rows → set Student ID, Payment Method, Status
+   → Mark reviewed rows as "OK to Upload"
+
+Step 3: Upload to Axcelerate
+   → Run: python bulk_payment.py
+   → Reads "OK to Upload" from tracker DB
+   → Resolves contact IDs (numeric or MAC ID lookup)
+   → Finds matching invoices (amount match)
+   → Records payments (allocated or unallocated)
+   → Updates tracker status (Axcelerate Updated / Unallocated / Check Manually)
+   → Saves CSV report: payment_report_YYYYMMDD_HHMMSS.csv
+```
+
+**Key files:**
+| File | Role |
+|------|------|
+| `tracker/app.py` | Streamlit UI for import + review |
+| `tracker/parsers.py` | Bank CSV + Xero Excel parsers |
+| `tracker/reconciler.py` | Auto-classification engine |
+| `tracker/database.py` | SQLite storage with dedup |
+| `bulk_payment.py` | Axcelerate API payment uploader |
+
 ---
 
 ## Decision Guide
@@ -258,6 +292,9 @@ When the user describes a workflow, map it to these patterns:
 | "Get a list / export data" | POST /report/run or /report/saved/run |
 | "Update contact details" | PUT /contact/:id |
 | "Find upcoming courses" | GET /course/instance/search |
+| "Reconcile bank payments" | Tracker app → `tracker/app.py` (import + review) |
+| "Upload payments to Axcelerate" | `bulk_payment.py` (reads from tracker DB) |
+| "Process bank file end to end" | Workflow E: Import → Review → Upload |
 
 ---
 

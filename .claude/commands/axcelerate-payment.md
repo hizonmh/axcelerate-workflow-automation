@@ -300,114 +300,41 @@ print(f"Unallocated payment: TRANSACTIONID={tx['TRANSACTIONID']} | Amount={tx['A
 
 ---
 
-### Pattern 3 — Bulk Payment Recording from CSV
-```python
-import csv, os
+### Pattern 3 — Bulk Payment Recording from Tracker Database
 
-# CSV columns: contact_id, date (DD/MM/YYYY), amount, payment_method (text), reference
-# contact_id may be a numeric contactID (e.g. 12982577) or an optionalID (e.g. MAC0001)
-# All payments are recorded as unallocated credits (no invoiceID)
-# Trailing commas and blank rows in the CSV are handled safely.
+The primary bulk payment workflow uses `bulk_payment.py`, which reads from the Bank Transaction Tracker's SQLite database. See `bulk_payment.py` for the full implementation.
 
-METHOD_MAP = {
-    "cash":           1,
-    "credit card":    2,
-    "cc":             2,
-    "direct deposit": 4,
-    "eft":            4,
-    "cheque":         5,
-    "check":          5,
-    "eftpos":         6,
-}
+**How it works:**
+1. Reads all rows with status "OK to Upload" from `tracker/tracker.db`
+2. Resolves contact IDs (numeric → direct; MAC ID → optionalID lookup)
+3. Searches for matching invoices (balance == payment amount) across SENT/PARTIAL/OVERDUE
+4. Records payment — allocated to invoice if match found, otherwise unallocated credit
+5. Updates tracker status: `Axcelerate Updated`, `Unallocated`, or `Check Manually`
+6. Saves CSV report to `payment_report_YYYYMMDD_HHMMSS.csv`
 
-CSV_PATH = os.path.join(os.path.dirname(__file__), "payments.csv")
-
-transactions = []
-failed_count = 0
-failed_rows  = []
-
-with open(CSV_PATH, newline="", encoding="utf-8") as f:
-    reader = csv.DictReader(f)
-    rows = [row for row in reader if any(v.strip() for v in row.values())]  # skip blank rows
-
-for row in rows:
-    raw_id            = row["contact_id"].strip()
-    trans_date        = row["date"].strip()
-    amount            = row["amount"].strip().replace(",", "")  # handle "1,000.00" formatting
-    payment_method    = row["payment_method"].strip()
-    reference         = row["reference"].strip()
-
-    method_label      = payment_method
-    payment_method_id = METHOD_MAP.get(payment_method.lower(), 4)  # default Direct Deposit
-
-    print(f"Processing {raw_id} | ${amount} | {payment_method} | {reference} | {trans_date}")
-
-    try:
-        # Resolve contactID — numeric = use directly; non-numeric = look up by optionalID
-        if raw_id.isdigit():
-            contact_id = int(raw_id)
-        else:
-            sr = requests.get(f"{BASE}/contacts/search", headers=headers, params={"optionalID": raw_id})
-            sr.raise_for_status()
-            results = sr.json()
-            if not results or not isinstance(results, list):
-                raise ValueError(f"No contact found for optionalID={raw_id}")
-            contact_id = int(results[0]["CONTACTID"])
-            print(f"  Resolved {raw_id} → CONTACTID={contact_id}")
-
-        payload = {
-            "contactID":       contact_id,
-            "amount":          float(amount),
-            "paymentMethodID": payment_method_id,
-            "transDate":       trans_date,
-            "reference":       reference,
-            "description":     reference,  # UI "Reference" column maps to description
-            # No invoiceID — recorded as unallocated credit
-        }
-
-        r = requests.post(f"{BASE}/accounting/transaction/", headers=headers, data=payload)
-        r.raise_for_status()
-        tx = r.json()
-
-        transactions.append({
-            "id":         raw_id,
-            "contact_id": contact_id,
-            "amount":     tx["AMOUNT"],
-            "method":     method_label,
-            "tx_id":      tx["TRANSACTIONID"],
-            "date":       tx["TRANSDATE"],
-            "reference":  tx.get("REFERENCE", reference),
-        })
-        # TRANSDATE in response is YYYY-MM-DD even though input was DD/MM/YYYY
-        print(f"  OK — TRANSACTIONID={tx['TRANSACTIONID']} | Amount={tx['AMOUNT']} | Date={tx['TRANSDATE']} | Reference={tx.get('REFERENCE', '(none)')}")
-
-    except Exception as e:
-        failed_count += 1
-        failed_rows.append({"id": raw_id, "amount": amount, "error": str(e)})
-        print(f"  FAILED — {e}")
-
-# ── SESSION TRANSACTION REPORT ───────────────────────────────────────
-print("\n" + "=" * 72)
-print("SESSION TRANSACTION REPORT")
-print("=" * 72)
-print(f"{'#':<4} {'Contact ID':<14} {'Invoice ID':<12} {'Amount':>10}  {'Method':<16} {'Tx ID':<12} {'Date':<14} {'Reference'}")
-print("-" * 72)
-for i, tx in enumerate(transactions, 1):
-    print(
-        f"{i:<4} {tx['contact_id']:<14} {str(tx.get('invoice_id', '—')):<12} "
-        f"${float(tx['amount']):>9.2f}  {tx['method']:<16} {str(tx['tx_id']):<12} "
-        f"{tx['date']:<14} {tx.get('reference', '')}"
-    )
-print("-" * 72)
-total = sum(float(t["amount"]) for t in transactions)
-print(f"{'TOTAL':<4} {'':<14} {'':<12} ${total:>9.2f}")
-print(f"\nSuccessful: {len(transactions)}  |  Failed: {failed_count}")
-if failed_rows:
-    print("\nFailed rows:")
-    for fr in failed_rows:
-        print(f"  Contact {fr['contact_id']} | ${fr['amount']} — {fr['error']}")
-print("=" * 72)
+```bash
+# Run from project root
+python bulk_payment.py
 ```
+
+**Field mapping (Tracker → Axcelerate API):**
+
+| Tracker Column | API Field | Notes |
+|----------------|-----------|-------|
+| `student` | `contactID` | Numeric ID or MAC ID (auto-resolved) |
+| `date` | `transDate` | Converted from YYYY-MM-DD to DD/MM/YYYY |
+| `amount` | `amount` | Stripped of $ and commas |
+| `payment_method` | `paymentMethodID` | Mapped via METHOD_MAP dict |
+| `bank_account` | `reference` + `description` | Set as both so it appears in UI |
+
+**Tracker status updates after processing:**
+
+| Outcome | New Status |
+|---------|------------|
+| Payment allocated to invoice | `Axcelerate Updated` |
+| No matching invoice found | `Unallocated` |
+| API error or invalid student | `Check Manually` |
+| Student field is empty/name (not ID) | `Check Manually` (skipped) |
 
 ---
 

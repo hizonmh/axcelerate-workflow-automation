@@ -11,6 +11,12 @@ SOP - Recording Payments in Axcelerate.md
 payments.csv
 payment_report_*.csv
 
+# Bank files — real bank transaction CSVs and Xero reconciliation exports
+bank files/
+
+# Tracker database — contains real transaction data
+tracker/tracker.db
+
 # Python
 __pycache__/
 *.pyc
