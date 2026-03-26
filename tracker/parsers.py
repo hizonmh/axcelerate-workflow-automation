@@ -5,6 +5,24 @@ from datetime import datetime
 import openpyxl
 from reconciler import reconcile_transaction, PAYMENT_FROM_AGENTS
 
+# Bank account → instance mapping for CSV files (filename-derived account names).
+# Accounts not listed here default to "MAC".
+BANK_ACCOUNT_INSTANCE: dict[str, str] = {
+    "GC Cheque": "NECGC",
+    "GC Prepaid": "NECGC",
+    "Melbourne Cheque": "NEC",
+    "Melbourne Prepaid": "NEC",
+}
+
+# Xero Excel account mapping: Row 4 Col A value → (bank_account, instance).
+# MAC accounts use the legacy first-word-before-dash extraction and are not listed here.
+XERO_ACCOUNT_MAP: dict[str, tuple[str, str]] = {
+    "ANZ (Acc - 220788848)": ("GC Cheque", "NECGC"),
+    "ANZ Prepaid (Acc - 303727821)": ("GC Prepaid", "NECGC"),
+    "ANZ - Business Chq Acc 5996": ("Melbourne Cheque", "NEC"),
+    "ANZ Prepaid Brisbane 4743": ("Melbourne Prepaid", "NEC"),
+}
+
 
 def _normalize_payer(text: str) -> str:
     """Normalize payer name for dedup: first 2 words, lowercase, no digits."""
@@ -124,6 +142,7 @@ def parse_combined_bank_csv(file_content: bytes | str) -> list[dict]:
 
         # Bank account from Source.Name (e.g. "Adelaide.csv" → "Adelaide")
         bank_account = re.sub(r"\.csv$", "", source_name, flags=re.IGNORECASE).strip()
+        instance = BANK_ACCOUNT_INSTANCE.get(bank_account, "MAC")
 
         # Determine payer for dedup
         if col_e and col_e != "#NAME?":
@@ -152,6 +171,7 @@ def parse_combined_bank_csv(file_content: bytes | str) -> list[dict]:
             "payment_note": col_i,
             "source": "Bank CSV",
             "bank_account": bank_account,
+            "instance": instance,
             "student": recon["student"],
             "payment_method": recon["payment_method"],
             "dedup_key": _make_dedup_key(date_str, amount, dedup_source, bank_account),
@@ -222,6 +242,8 @@ def parse_bank_csv(file_content: bytes | str, bank_account: str = "") -> list[di
             amount=amount,
         )
 
+        instance = BANK_ACCOUNT_INSTANCE.get(bank_account, "MAC")
+
         records.append({
             "date": date_str,
             "amount": amount,
@@ -231,6 +253,7 @@ def parse_bank_csv(file_content: bytes | str, bank_account: str = "") -> list[di
             "payment_note": payment_note,
             "source": "Bank CSV",
             "bank_account": bank_account,
+            "instance": instance,
             "student": recon["student"],
             "payment_method": recon["payment_method"],
             "dedup_key": _make_dedup_key(date_str, amount, dedup_source, bank_account),
@@ -256,8 +279,13 @@ def parse_xero_excel(file_content: bytes) -> list[dict]:
     # Extract bank account name from row 4 (e.g. "Adelaide - 316307842" → "Adelaide")
     row4_val = ws.cell(4, 1).value
     bank_account = ""
+    instance = "MAC"
     if row4_val:
-        bank_account = str(row4_val).split(" - ")[0].strip()
+        raw = str(row4_val).strip()
+        if raw in XERO_ACCOUNT_MAP:
+            bank_account, instance = XERO_ACCOUNT_MAP[raw]
+        else:
+            bank_account = raw.split(" - ")[0].strip()
 
     records = []
     data_started = False
@@ -364,6 +392,7 @@ def parse_xero_excel(file_content: bytes) -> list[dict]:
             "payment_note": payment_note,
             "source": "Xero",
             "bank_account": bank_account,
+            "instance": instance,
             "student": recon["student"],
             "payment_method": recon["payment_method"],
             "dedup_key": _make_dedup_key(date_str, amount, payer_name, bank_account),

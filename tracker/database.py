@@ -46,6 +46,11 @@ def init_db():
         conn.execute("SELECT updated_at FROM transactions LIMIT 1")
     except Exception:
         conn.execute("ALTER TABLE transactions ADD COLUMN updated_at TEXT")
+    # Migration: add instance column if missing (MAC = default for existing rows)
+    try:
+        conn.execute("SELECT instance FROM transactions LIMIT 1")
+    except Exception:
+        conn.execute("ALTER TABLE transactions ADD COLUMN instance TEXT NOT NULL DEFAULT 'MAC'")
     conn.commit()
     conn.close()
 
@@ -73,8 +78,8 @@ def upsert_transactions(records: list[dict]) -> dict:
             status = "No Action" if method in no_action_methods else "Unreconciled"
             cur.execute(
                 """INSERT INTO transactions
-                   (date, amount, description, payer_name, reference, payment_note, source, bank_account, student, status, payment_method, dedup_key, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (date, amount, description, payer_name, reference, payment_note, source, bank_account, student, status, payment_method, dedup_key, created_at, instance)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     rec["date"],
                     rec["amount"],
@@ -89,28 +94,59 @@ def upsert_transactions(records: list[dict]) -> dict:
                     method,
                     rec["dedup_key"],
                     datetime.now().isoformat(),
+                    rec.get("instance", "MAC"),
                 ),
             )
             inserted += 1
         elif rec["source"] == "Bank CSV" and existing["source"] == "Xero":
-            # CSV is preferred — update the existing Xero record with richer CSV data
-            cur.execute(
-                """UPDATE transactions
-                   SET description = ?, payer_name = ?, reference = ?, payment_note = ?,
-                       source = ?, bank_account = ?, student = ?, payment_method = ?
-                   WHERE id = ?""",
-                (
-                    rec["description"],
-                    rec["payer_name"],
-                    rec["reference"],
-                    rec["payment_note"],
-                    rec["source"],
-                    rec.get("bank_account", ""),
-                    rec.get("student", ""),
-                    rec.get("payment_method", "Direct Deposit"),
-                    existing["id"],
-                ),
-            )
+            # CSV is preferred — update the existing Xero record with richer CSV data.
+            # Check if the row has already been actioned (anything beyond Unreconciled).
+            # If so, only update informational fields — preserve student, payment_method, status.
+            existing_row = cur.execute(
+                "SELECT status FROM transactions WHERE id = ?",
+                (existing["id"],),
+            ).fetchone()
+            already_actioned = existing_row["status"] not in ("Unreconciled", "No Action")
+
+            if already_actioned:
+                # Preserve reconciliation fields, only enrich descriptive data
+                cur.execute(
+                    """UPDATE transactions
+                       SET description = ?, payer_name = ?, reference = ?, payment_note = ?,
+                           source = ?, bank_account = ?, updated_at = ?
+                       WHERE id = ?""",
+                    (
+                        rec["description"],
+                        rec["payer_name"],
+                        rec["reference"],
+                        rec["payment_note"],
+                        rec["source"],
+                        rec.get("bank_account", ""),
+                        datetime.now().isoformat(),
+                        existing["id"],
+                    ),
+                )
+            else:
+                # Not yet actioned — full update including reconciliation fields
+                cur.execute(
+                    """UPDATE transactions
+                       SET description = ?, payer_name = ?, reference = ?, payment_note = ?,
+                           source = ?, bank_account = ?, student = ?, payment_method = ?,
+                           updated_at = ?
+                       WHERE id = ?""",
+                    (
+                        rec["description"],
+                        rec["payer_name"],
+                        rec["reference"],
+                        rec["payment_note"],
+                        rec["source"],
+                        rec.get("bank_account", ""),
+                        rec.get("student", ""),
+                        rec.get("payment_method", "Direct Deposit"),
+                        datetime.now().isoformat(),
+                        existing["id"],
+                    ),
+                )
             updated += 1
         else:
             skipped += 1

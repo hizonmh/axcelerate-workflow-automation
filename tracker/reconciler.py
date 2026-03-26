@@ -70,13 +70,18 @@ FEE_WORDS: set[str] = {
     "term", "transfer", "receipt", "stud",
 }
 
-# Macallan entity name fragments (Col F) — these are NOT agents
-MACALLAN_ENTITIES: list[str] = [
+# Own entity name fragments (Col F) — these are NOT agents
+OWN_ENTITIES: list[str] = [
+    # MAC
     "macallan education",
     "macallan college",
     "macall",
     "macalla",
     "mavallan",
+    # NECGC
+    "new england school of english",
+    "new england college",
+    "necgc",
 ]
 
 # Student ID regex: 8-digit number starting with 1
@@ -86,12 +91,12 @@ STUDENT_ID_RE = re.compile(r"(?<!\d)(1\d{7})(?!\d)")
 MAC_ID_RE = re.compile(r"\bMAC\s?(\d{4})\b", re.IGNORECASE)
 
 
-def _is_macallan_entity(text: str) -> bool:
-    """Check if text is a Macallan entity name (not an external org)."""
+def _is_own_entity(text: str) -> bool:
+    """Check if text is one of our own entity names (not an external org)."""
     if not text:
-        return True  # empty = assume Macallan
+        return True  # empty = assume own entity
     lower = text.lower().strip()
-    return any(m in lower for m in MACALLAN_ENTITIES)
+    return any(m in lower for m in OWN_ENTITIES)
 
 
 def _clean_student_name(text: str) -> str:
@@ -313,7 +318,7 @@ def classify_payment_method(
         return "Agent Deduction"
 
     # Col F (payee) is NOT a Macallan entity → external org paying = Agent Deduction
-    if payee and not _is_macallan_entity(payee):
+    if payee and not _is_own_entity(payee):
         return "Agent Deduction"
 
     # Payer paying for a different student (payer ≠ student in references)

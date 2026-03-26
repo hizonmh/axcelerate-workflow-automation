@@ -15,6 +15,7 @@ After processing, updates tracker status:
   Error       → "Check Manually"
 """
 
+import argparse
 import csv
 import os
 import re
@@ -24,11 +25,28 @@ import requests
 from dotenv import load_dotenv
 
 load_dotenv()
-API_TOKEN = os.getenv("AXCELERATE_API_TOKEN")
-WS_TOKEN  = os.getenv("AXCELERATE_WS_TOKEN")
-BASE      = os.getenv("AXCELERATE_BASE_URL")
+
+# --- Instance selection ---
+parser = argparse.ArgumentParser(description="Bulk payment uploader for Axcelerate")
+parser.add_argument("--instance", default="MAC", choices=["MAC", "NECGC", "NEC"],
+                    help="Which Axcelerate instance to upload to (default: MAC)")
+args = parser.parse_args()
+instance = args.instance
+
+INSTANCE_CREDS = {
+    "MAC":   ("AXCELERATE_API_TOKEN", "AXCELERATE_WS_TOKEN", "AXCELERATE_BASE_URL"),
+    "NECGC": ("NECGC_API_TOKEN",     "NECGC_WS_TOKEN",      "NECGC_BASE_URL"),
+    "NEC":   ("NEC_API_TOKEN",        "NEC_WS_TOKEN",         "NEC_BASE_URL"),
+}
+
+token_key, ws_key, url_key = INSTANCE_CREDS[instance]
+API_TOKEN = os.getenv(token_key)
+WS_TOKEN  = os.getenv(ws_key)
+BASE      = os.getenv(url_key)
 
 headers = {"apitoken": API_TOKEN, "wstoken": WS_TOKEN}
+
+print(f"Instance: {instance}  |  API base: {BASE}")
 
 METHOD_MAP = {
     "cash":             1,
@@ -56,12 +74,14 @@ print(f"Loading 'OK to Upload' transactions from: {DB_PATH}\n")
 conn = sqlite3.connect(DB_PATH)
 conn.row_factory = sqlite3.Row
 rows_raw = conn.execute(
-    "SELECT id, student, date, amount, payment_method, bank_account FROM transactions WHERE status = 'OK to Upload' ORDER BY date"
+    "SELECT id, student, date, amount, payment_method, bank_account FROM transactions "
+    "WHERE status = 'OK to Upload' AND instance = ? ORDER BY date",
+    (instance,),
 ).fetchall()
 rows = [dict(r) for r in rows_raw]
 conn.close()
 
-print(f"Found {len(rows)} transaction(s) with status 'OK to Upload'\n")
+print(f"Found {len(rows)} {instance} transaction(s) with status 'OK to Upload'\n")
 
 if not rows:
     print("Nothing to process. Exiting.")
@@ -265,7 +285,7 @@ print("=" * 130)
 # ── CSV REPORT ──────────────────────────────────────────────────────
 report_path = os.path.join(
     os.path.dirname(__file__),
-    f"payment_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+    f"payment_report_{instance}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
 )
 
 report_fields = [

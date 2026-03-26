@@ -302,20 +302,25 @@ print(f"Unallocated payment: TRANSACTIONID={tx['TRANSACTIONID']} | Amount={tx['A
 
 ### Pattern 3 — Bulk Payment Recording from Tracker Database
 
-The primary bulk payment workflow uses `bulk_payment.py`, which reads from the Bank Transaction Tracker's SQLite database. See `bulk_payment.py` for the full implementation.
+The primary bulk payment workflow uses `bulk_payment.py`, which reads from the Bank Transaction Tracker's SQLite database. It supports **three Axcelerate instances** (MAC, NECGC, NEC/NECTECH), each with separate API credentials.
 
 **How it works:**
-1. Reads all rows with status "OK to Upload" from `tracker/tracker.db`
+1. Reads "OK to Upload" rows for the selected instance from `tracker/tracker.db`
 2. Resolves contact IDs (numeric → direct; MAC ID → optionalID lookup)
 3. Searches for matching invoices (balance == payment amount) across SENT/PARTIAL/OVERDUE
 4. Records payment — allocated to invoice if match found, otherwise unallocated credit
 5. Updates tracker status: `Axcelerate Updated`, `Unallocated`, or `Check Manually`
-6. Saves CSV report to `payment_report_YYYYMMDD_HHMMSS.csv`
+6. Saves CSV report to `payment_report_<INSTANCE>_YYYYMMDD_HHMMSS.csv`
 
 ```bash
-# Run from project root
-python bulk_payment.py
+# Run from project root — select instance with --instance flag
+python bulk_payment.py                  # Default: MAC
+python bulk_payment.py --instance MAC   # Macallan College
+python bulk_payment.py --instance NECGC # NEC Gold Coast
+python bulk_payment.py --instance NEC   # NEC Melbourne (NECTECH)
 ```
+
+The tracker app's "Upload to Axcelerate" section has per-instance buttons that invoke this script automatically.
 
 **Field mapping (Tracker → Axcelerate API):**
 

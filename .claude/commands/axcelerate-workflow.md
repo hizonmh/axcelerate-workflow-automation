@@ -242,37 +242,44 @@ for e in enrolments:
 
 ### Workflow E — Bank Reconciliation → Review → Upload to Axcelerate
 
-This is the end-to-end payment processing pipeline using the Bank Transaction Tracker and Bulk Payment Uploader.
+This is the end-to-end payment processing pipeline using the Bank Transaction Tracker and Bulk Payment Uploader. It supports **three Axcelerate instances** (MAC, NECGC, NEC/NECTECH) with automatic instance detection from bank account names.
 
 ```
 Step 1: Import bank files into tracker
    → Run: cd tracker && streamlit run app.py
    → Upload bank CSV or Xero Excel files via the UI
+   → Parsers auto-detect instance from bank account name
    → Reconciler auto-classifies student + payment method
 
-Step 2: Review and reconcile in tracker UI
+Step 2: Review and reconcile in tracker UI (6 tabs)
+   → MAC-Received / MAC-Spent
+   → NECGC-Received / NECGC-Spent
+   → NECTECH-Received / NECTECH-Spent
    → Filter by status (Unreconciled), search by name/reference
    → Select rows → set Student ID, Payment Method, Status
    → Mark reviewed rows as "OK to Upload"
 
-Step 3: Upload to Axcelerate
-   → Run: python bulk_payment.py
-   → Reads "OK to Upload" from tracker DB
+Step 3: Upload to Axcelerate (per-instance)
+   → Use the "Upload to Axcelerate" expander in the tracker UI
+   → Each instance has its own upload button (MAC, NECGC, NECTECH)
+   → Or run manually: python bulk_payment.py --instance <MAC|NECGC|NEC>
+   → Uses instance-specific API credentials from .env
+   → Reads "OK to Upload" rows for that instance from tracker DB
    → Resolves contact IDs (numeric or MAC ID lookup)
    → Finds matching invoices (amount match)
    → Records payments (allocated or unallocated)
    → Updates tracker status (Axcelerate Updated / Unallocated / Check Manually)
-   → Saves CSV report: payment_report_YYYYMMDD_HHMMSS.csv
+   → Saves CSV report: payment_report_<INSTANCE>_YYYYMMDD_HHMMSS.csv
 ```
 
 **Key files:**
 | File | Role |
 |------|------|
-| `tracker/app.py` | Streamlit UI for import + review |
-| `tracker/parsers.py` | Bank CSV + Xero Excel parsers |
+| `tracker/app.py` | Streamlit UI — 6-tab layout with per-instance upload |
+| `tracker/parsers.py` | Bank CSV + Xero Excel parsers with instance-aware account mapping |
 | `tracker/reconciler.py` | Auto-classification engine |
-| `tracker/database.py` | SQLite storage with dedup |
-| `bulk_payment.py` | Axcelerate API payment uploader |
+| `tracker/database.py` | SQLite storage with dedup and `instance` column |
+| `bulk_payment.py` | Multi-instance Axcelerate API payment uploader (`--instance` flag) |
 
 ---
 
@@ -292,9 +299,9 @@ When the user describes a workflow, map it to these patterns:
 | "Get a list / export data" | POST /report/run or /report/saved/run |
 | "Update contact details" | PUT /contact/:id |
 | "Find upcoming courses" | GET /course/instance/search |
-| "Reconcile bank payments" | Tracker app → `tracker/app.py` (import + review) |
-| "Upload payments to Axcelerate" | `bulk_payment.py` (reads from tracker DB) |
-| "Process bank file end to end" | Workflow E: Import → Review → Upload |
+| "Reconcile bank payments" | Tracker app → `tracker/app.py` (import + review, auto-detects instance) |
+| "Upload payments to Axcelerate" | `bulk_payment.py --instance <MAC\|NECGC\|NEC>` (reads from tracker DB) |
+| "Process bank file end to end" | Workflow E: Import → Review → Upload (per-instance) |
 
 ---
 

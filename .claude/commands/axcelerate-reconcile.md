@@ -1,6 +1,6 @@
 # Axcelerate Bank CSV Reconciliation
 
-You are an expert at reconciling raw bank transaction files from Macallan College bank accounts. You process and reconcile bank CSVs by adding two columns: **Student** (who the payment is for) and **Payment Method** (how it was paid).
+You are an expert at reconciling raw bank transaction files from Macallan College, NECGC, and NECTECH bank accounts. You process and reconcile bank CSVs by adding two columns: **Student** (who the payment is for) and **Payment Method** (how it was paid). The system supports three Axcelerate instances: MAC, NECGC, and NEC (NECTECH).
 
 ## Trigger Prompts
 
@@ -153,7 +153,7 @@ The reconciler classifies each incoming transaction by:
    - Checks for Stripe, Ezidebit (Direct Debit), FUNDS TFER (Internal Transfer)
    - Checks known PAYMENT FROM / TRANSFER FROM agents → Agent Deduction
    - Checks org keywords in payer name (PTY, LTD, etc.) → Agent Deduction
-   - Checks Col F payee (non-Macallan entity) → Agent Deduction
+   - Checks Col F payee against `OWN_ENTITIES` list (non-own entity) → Agent Deduction
    - Checks payer ≠ student (different names in payer vs references) → Agent Deduction
    - Default → Direct Deposit
 
@@ -164,15 +164,27 @@ The reconciler classifies each incoming transaction by:
    - Direct Deposit: payer name (cleaned of fee/noise words)
    - Internal Transfer / Direct Debit: "Unknown"
 
+### Multi-Instance Support
+
+Transactions are automatically tagged with an `instance` code based on bank account:
+
+| Bank Account | Instance | UI Label |
+|--------------|----------|----------|
+| Adelaide, Brisbane Cheque/Prepaid, Adelaide Prepaid | MAC | MAC |
+| GC Cheque, GC Prepaid | NECGC | NECGC |
+| Melbourne Cheque, Melbourne Prepaid | NEC | NECTECH |
+
+Account-to-instance mapping is defined in `parsers.py` via `BANK_ACCOUNT_INSTANCE` (for CSV) and `XERO_ACCOUNT_MAP` (for Xero Excel).
+
 ### Data Flow
 
 ```
 Bank CSV / Xero Excel
-    ↓ parsers.py (detect_and_parse)
+    ↓ parsers.py (detect_and_parse, auto-detect instance from account)
     ↓ reconciler.py (auto-classify student + method)
-    ↓ database.py (upsert with dedup)
-    ↓ app.py (Streamlit UI: review, edit, mark "OK to Upload")
-    ↓ bulk_payment.py (upload to Axcelerate API)
+    ↓ database.py (upsert with dedup, instance column)
+    ↓ app.py (6-tab Streamlit UI: MAC/NECGC/NECTECH × Received/Spent)
+    ↓ bulk_payment.py --instance <CODE> (upload to correct Axcelerate instance)
 ```
 
 ### Supported File Formats
@@ -200,6 +212,6 @@ When new patterns are discovered during reconciliation:
 - **New PAYMENT FROM agents**: Add to `PAYMENT_FROM_AGENTS` dict in `tracker/reconciler.py` with column preference (h/i/hi/d)
 - **New TRANSFER FROM agents**: Add to `TRANSFER_FROM_AGENTS` list in `tracker/reconciler.py`
 - **New organisation keywords**: Add to `ORG_KEYWORDS` list
-- **New Macallan entity names**: Add to `MACALLAN_ENTITIES` list (prevents false agent detection)
+- **New own entity names**: Add to `OWN_ENTITIES` list (prevents false agent detection for MAC, NECGC, NECTECH entities)
 - **New fee/noise words**: Add to `FEE_WORDS` set (cleaned from student name extraction)
 - Update this file with the new patterns for future reference

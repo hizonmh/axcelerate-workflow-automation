@@ -4,5 +4,9 @@
       "WebFetch(domain:app.axcelerate.com)",
       "WebFetch(domain:developer.axcelerate.com)"
     ]
-  }
+  },
+  "enabledMcpjsonServers": [
+    "axcelerate"
+  ],
+  "enableAllProjectMcpServers": true
 }

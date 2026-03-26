@@ -4,12 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Repository Is
 
-This is a **Claude AI command library, MCP server, and automation toolkit** for managing workflows against the **Axcelerate training management system** REST API. It contains:
+This is a **Claude AI command library, MCP server, and automation toolkit** for managing workflows against the **Axcelerate training management system** REST API. It supports **three Axcelerate instances** (MAC, NECGC, NECTECH) across multiple colleges. It contains:
 
 - **Claude Code skills** (prompt commands) for each API domain
 - A **Model Context Protocol (MCP) server** exposing Axcelerate API as tools for any MCP-compatible client
-- A **Bank Transaction Tracker** (Streamlit web app) for importing, reconciling, and managing bank transactions
-- A **Bulk Payment Uploader** script that reads reconciled transactions from the tracker and records them in Axcelerate
+- A **Bank Transaction Tracker** (Streamlit web app) for importing, reconciling, and managing bank transactions across all three instances
+- A **Bulk Payment Uploader** script that reads reconciled transactions from the tracker and records them in the correct Axcelerate instance
 - A **Reconciliation Engine** that auto-classifies bank transactions by student and payment method
 
 ## Repository Structure
@@ -21,8 +21,9 @@ This is a **Claude AI command library, MCP server, and automation toolkit** for 
 - `tracker/` — Bank Transaction Tracker app (see below).
 - `bulk_payment.py` — Bulk payment uploader script (see below).
 - `.mcp.json` — Project-level MCP server registration for Claude Code.
-- `.env` — API tokens (gitignored, never committed)
-- `payments/` — Operational payment data and legacy scripts (gitignored, never committed)
+- `.env` — API tokens for all three instances (gitignored, never committed)
+- `payments/` — Operational payment data (gitignored, never committed)
+- `legacy payments/` — Legacy per-instance bulk payment scripts (gitignored, never committed)
 
 ## Command Files and Their Domains
 
@@ -40,16 +41,28 @@ This is a **Claude AI command library, MCP server, and automation toolkit** for 
 
 ## API Authentication Pattern
 
-All generated Python code loads credentials from a `.env` file using `python-dotenv`:
+All generated Python code loads credentials from a `.env` file using `python-dotenv`. The system supports **three Axcelerate instances**, each with its own API tokens and base URL:
 
 ```python
 from dotenv import load_dotenv
 import os
 
 load_dotenv()
+
+# MAC instance (default)
 API_TOKEN = os.getenv("AXCELERATE_API_TOKEN")
 WS_TOKEN  = os.getenv("AXCELERATE_WS_TOKEN")
-BASE_URL  = os.getenv("AXCELERATE_BASE_URL")  # e.g. https://{subdomain}.app.axcelerate.com/api
+BASE_URL  = os.getenv("AXCELERATE_BASE_URL")
+
+# NECGC instance
+NECGC_API_TOKEN = os.getenv("NECGC_API_TOKEN")
+NECGC_WS_TOKEN  = os.getenv("NECGC_WS_TOKEN")
+NECGC_BASE_URL  = os.getenv("NECGC_BASE_URL")
+
+# NECTECH instance (env prefix: NEC_)
+NEC_API_TOKEN = os.getenv("NEC_API_TOKEN")
+NEC_WS_TOKEN  = os.getenv("NEC_WS_TOKEN")
+NEC_BASE_URL  = os.getenv("NEC_BASE_URL")
 
 headers = {
     "apitoken": API_TOKEN,
@@ -57,7 +70,15 @@ headers = {
 }
 ```
 
-Both tokens come from the Axcelerate admin panel. The base URL is instance-specific (each organisation has its own subdomain). Use `<PLACEHOLDER>` in generated code for any value the user must supply. **Never hardcode tokens in scripts.**
+### Instance Credential Mapping
+
+| Instance | Display Label | API Token Env Var | WS Token Env Var | Base URL Env Var |
+|----------|---------------|-------------------|------------------|------------------|
+| MAC | MAC | `AXCELERATE_API_TOKEN` | `AXCELERATE_WS_TOKEN` | `AXCELERATE_BASE_URL` |
+| NECGC | NECGC | `NECGC_API_TOKEN` | `NECGC_WS_TOKEN` | `NECGC_BASE_URL` |
+| NEC | NECTECH | `NEC_API_TOKEN` | `NEC_WS_TOKEN` | `NEC_BASE_URL` |
+
+Both tokens come from the Axcelerate admin panel. The base URL is instance-specific (each organisation has its own subdomain). Use `<PLACEHOLDER>` in generated code for any value the user must supply. **Never hardcode tokens or base URLs in scripts.**
 
 ## Key API Conventions
 
@@ -137,7 +158,7 @@ claude mcp add axcelerate -- python axcelerate-mcp-server/server.py
 - **`requirements.txt`** — Dependencies: `mcp`, `httpx`, `python-dotenv`
 - Uses `httpx.AsyncClient` for async HTTP requests
 - All POST/PUT use form encoding (`data=`), consistent with the API conventions above
-- Reads credentials from `.env` (`AXCELERATE_API_TOKEN`, `AXCELERATE_WS_TOKEN`, `AXCELERATE_BASE_URL`)
+- Reads credentials from `.env` (currently configured for MAC instance: `AXCELERATE_API_TOKEN`, `AXCELERATE_WS_TOKEN`, `AXCELERATE_BASE_URL`)
 
 ### Tool Domains
 
@@ -159,25 +180,43 @@ claude mcp add axcelerate -- python axcelerate-mcp-server/server.py
 
 ## Bank Transaction Tracker
 
-The `tracker/` directory contains a Streamlit web app for importing, reconciling, and managing bank transactions before uploading them to Axcelerate.
+The `tracker/` directory contains a Streamlit web app for importing, reconciling, and managing bank transactions before uploading them to Axcelerate. It supports **three Axcelerate instances** (MAC, NECGC, NECTECH) with 6 tabs (Received/Spent per instance).
 
 ### Components
 
 | File | Purpose |
 |------|---------|
-| `tracker/app.py` | Streamlit UI — import files, filter/search transactions, bulk edit status/student/method |
-| `tracker/database.py` | SQLite database layer — `transactions` table with upsert, bulk update, stats |
-| `tracker/parsers.py` | File parsers — bank CSV (single and combined multi-bank), Xero Excel reconciliation exports |
+| `tracker/app.py` | Streamlit UI — 6-tab layout (MAC/NECGC/NECTECH × Received/Spent), import files, filter/search, bulk edit, per-instance upload |
+| `tracker/database.py` | SQLite database layer — `transactions` table with `instance` column, upsert, bulk update, stats |
+| `tracker/parsers.py` | File parsers — bank CSV (single + combined multi-bank) and Xero Excel. Instance-aware account mapping |
 | `tracker/reconciler.py` | Reconciliation engine — classifies payment method and extracts student from transaction data |
 | `tracker/requirements.txt` | Dependencies: `streamlit`, `pandas`, `openpyxl` |
 | `tracker/tracker.db` | SQLite database (gitignored — contains real transaction data) |
 
+### Multi-Instance Architecture
+
+Each transaction is tagged with an `instance` code based on its bank account:
+
+| Bank Account | Instance Code | UI Tab Label |
+|--------------|---------------|--------------|
+| Adelaide, Brisbane Cheque, Brisbane Prepaid, Adelaide Prepaid | MAC | MAC |
+| GC Cheque, GC Prepaid | NECGC | NECGC |
+| Melbourne Cheque, Melbourne Prepaid | NEC | NECTECH |
+
+**Account mapping for bank CSV files** (`BANK_ACCOUNT_INSTANCE` in `parsers.py`):
+- Account names are derived from CSV filenames (e.g., `GC Cheque.csv` → `GC Cheque`)
+- Unmapped accounts default to `MAC`
+
+**Account mapping for Xero Excel files** (`XERO_ACCOUNT_MAP` in `parsers.py`):
+- Row 4, Column A in the "Bank Statement" tab contains the account identifier
+- Exact-match lookup against the mapping dict; falls back to `split(" - ")[0]` for MAC accounts
+
 ### How It Works
 
-1. **Import** — Upload bank CSV or Xero Excel files via the Streamlit UI. The parsers auto-detect format, run reconciliation to populate student and payment method, and upsert into SQLite (deduplication by date+amount+payer+account).
-2. **Review** — Filter by status, payment method, bank account, and student. Search across payer names, references, and descriptions. Select rows and bulk-edit student, status, or payment method.
+1. **Import** — Upload bank CSV or Xero Excel files via the Streamlit UI. The parsers auto-detect format and instance, run reconciliation to populate student and payment method, and upsert into SQLite (deduplication by date+amount+payer+account).
+2. **Review** — Each instance has Received and Spent tabs. Filter by status, payment method, bank account, and student. Search across payer names, references, and descriptions. Select rows and bulk-edit student, status, or payment method.
 3. **Mark for Upload** — Set transaction status to "OK to Upload" for rows ready to push to Axcelerate.
-4. **Upload** — Run `bulk_payment.py` to read "OK to Upload" rows from the tracker DB and record them in Axcelerate via the API.
+4. **Upload** — Use the per-instance upload buttons in the "Upload to Axcelerate" expander, which runs `bulk_payment.py --instance <CODE>` to read "OK to Upload" rows for that instance and record them via the correct Axcelerate API credentials.
 
 ### Transaction Statuses
 
@@ -200,16 +239,31 @@ streamlit run app.py
 
 ## Bulk Payment Uploader
 
-`bulk_payment.py` reads transactions with status "OK to Upload" from the tracker SQLite database and records each as a payment in Axcelerate.
+`bulk_payment.py` reads transactions with status "OK to Upload" from the tracker SQLite database and records each as a payment in the correct Axcelerate instance.
+
+### Multi-Instance Support
+
+The script accepts an `--instance` argument to select which Axcelerate instance to upload to:
+
+```bash
+python bulk_payment.py                  # Default: MAC
+python bulk_payment.py --instance MAC   # Macallan College
+python bulk_payment.py --instance NECGC # NEC Gold Coast
+python bulk_payment.py --instance NEC   # NEC Melbourne (NECTECH)
+```
+
+Each instance uses its own API credentials from `.env` (see Instance Credential Mapping above). The SQL query filters by `instance` column to only process transactions for the selected instance.
+
+The tracker app's "Upload to Axcelerate" section has per-instance buttons that call this script with the appropriate `--instance` argument.
 
 ### What It Does
 
-1. Loads "OK to Upload" rows from `tracker/tracker.db`
+1. Loads "OK to Upload" rows for the selected instance from `tracker/tracker.db`
 2. Resolves contact IDs (numeric IDs used directly; MAC IDs looked up via optionalID search)
 3. Searches for a matching invoice (balance == payment amount) across SENT, PARTIAL, and OVERDUE statuses
 4. Records the payment — allocated to invoice if found, otherwise as unallocated credit
 5. Updates tracker row status: `Axcelerate Updated` (allocated), `Unallocated` (no invoice match), or `Check Manually` (error)
-6. Prints a session transaction report and saves a CSV report to `payment_report_YYYYMMDD_HHMMSS.csv`
+6. Prints a session transaction report and saves a CSV report to `payment_report_<INSTANCE>_YYYYMMDD_HHMMSS.csv`
 
 ### Field Mapping (Tracker → Axcelerate)
 
@@ -221,12 +275,6 @@ streamlit run app.py
 | `payment_method` | `paymentMethodID` (mapped via METHOD_MAP) |
 | `bank_account` | `reference` and `description` |
 
-### Running
-
-```bash
-python bulk_payment.py
-```
-
 ## Reconciliation Engine
 
 `tracker/reconciler.py` implements the classification rules from `axcelerate-reconcile.md`:
@@ -234,6 +282,7 @@ python bulk_payment.py
 - **Payment Method Classification**: Direct Deposit, Agent Deduction, Direct Debit, Stripe, Internal Transfer
 - **Student Extraction**: Student ID (8-digit) → MAC ID → Student Name → Unknown
 - **Known Agent Detection**: 25+ agents with column-specific extraction preferences (PAYMENT FROM and TRANSFER FROM patterns)
+- **Own Entity Detection**: `OWN_ENTITIES` list includes entity names for MAC and NECGC colleges — transactions from these entities are not misclassified as Agent Deductions
 
 The reconciler is called automatically by the parsers during import. It can also be invoked directly:
 

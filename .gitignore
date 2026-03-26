@@ -4,6 +4,9 @@
 # Operational data — contains real student contact IDs, payment amounts, and transaction records
 payments/
 
+# Legacy per-instance bulk payment scripts — contain hardcoded URLs and real payment data
+legacy payments/
+
 # Internal SOP — company-specific operational procedures
 SOP - Recording Payments in Axcelerate.md
 

@@ -1,5 +1,8 @@
 import streamlit as st
 import pandas as pd
+import subprocess
+import sys
+import os
 from database import init_db, upsert_transactions, get_all_transactions, bulk_update_status
 from parsers import detect_and_parse
 
@@ -41,6 +44,79 @@ with st.expander("Import Transactions"):
         st.session_state.uploader_key += 1
         st.rerun()
 
+# --- Upload to Axcelerate section ---
+def _upload_panel(instance_label: str, instance_code: str):
+    """Render upload counts and button for one Axcelerate instance."""
+    from database import get_connection
+    conn = get_connection()
+    ok_count = conn.execute(
+        "SELECT COUNT(*) FROM transactions WHERE status = 'OK to Upload' AND instance = ?",
+        (instance_code,),
+    ).fetchone()[0]
+    ok_total = conn.execute(
+        "SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE status = 'OK to Upload' AND instance = ?",
+        (instance_code,),
+    ).fetchone()[0]
+    conn.close()
+
+    running_key = f"upload_running_{instance_code}"
+    output_key = f"upload_output_{instance_code}"
+    if running_key not in st.session_state:
+        st.session_state[running_key] = False
+    if output_key not in st.session_state:
+        st.session_state[output_key] = None
+
+    if ok_count == 0:
+        st.caption(f"**{instance_label}**: No transactions ready to upload.")
+    else:
+        st.markdown(f"**{instance_label}**: {ok_count} txn(s) — **${ok_total:,.2f}**")
+        if st.button(f"Upload {instance_label}", type="primary", key=f"upload_btn_{instance_code}",
+                      disabled=st.session_state[running_key]):
+            st.session_state[running_key] = True
+            script_path = os.path.join(os.path.dirname(__file__), "..", "bulk_payment.py")
+            with st.spinner(f"Uploading {instance_label} payments..."):
+                result = subprocess.run(
+                    [sys.executable, script_path, "--instance", instance_code],
+                    capture_output=True,
+                    text=True,
+                    cwd=os.path.dirname(script_path),
+                    timeout=600,
+                )
+            st.session_state[running_key] = False
+            st.session_state[output_key] = {
+                "returncode": result.returncode,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+            }
+            st.session_state.table_key += 1
+            st.rerun()
+
+    if st.session_state[output_key] is not None:
+        output = st.session_state[output_key]
+        if output["returncode"] == 0:
+            st.success(f"{instance_label} upload completed successfully.")
+        else:
+            st.error(f"{instance_label} upload finished with errors (exit code {output['returncode']}).")
+        if output["stdout"]:
+            st.code(output["stdout"], language="text")
+        if output["stderr"]:
+            st.caption("Errors:")
+            st.code(output["stderr"], language="text")
+        if st.button(f"Clear {instance_label} output", key=f"clear_{instance_code}"):
+            st.session_state[output_key] = None
+            st.rerun()
+
+
+with st.expander("Upload to Axcelerate"):
+    col_u1, col_u2 = st.columns(2)
+    with col_u1:
+        _upload_panel("MAC", "MAC")
+    with col_u2:
+        _upload_panel("NECGC", "NECGC")
+    col_u3, _ = st.columns(2)
+    with col_u3:
+        _upload_panel("NECTECH", "NEC")
+
 # Load data
 all_txns = get_all_transactions()
 if not all_txns:
@@ -49,9 +125,18 @@ if not all_txns:
 
 df = pd.DataFrame(all_txns)
 
-# Split into received/spent
-received_df = df[df["amount"] > 0].copy()
-spent_df = df[df["amount"] < 0].copy()
+# Split by instance and direction
+_instance_col = df["instance"] if "instance" in df.columns else pd.Series("MAC", index=df.index)
+mac_df = df[_instance_col == "MAC"]
+necgc_df = df[_instance_col == "NECGC"]
+nec_df = df[_instance_col == "NEC"]
+
+mac_received = mac_df[mac_df["amount"] > 0].copy()
+mac_spent = mac_df[mac_df["amount"] < 0].copy()
+necgc_received = necgc_df[necgc_df["amount"] > 0].copy()
+necgc_spent = necgc_df[necgc_df["amount"] < 0].copy()
+nec_received = nec_df[nec_df["amount"] > 0].copy()
+nec_spent = nec_df[nec_df["amount"] < 0].copy()
 
 
 def render_transaction_table(tab_df: pd.DataFrame, tab_key: str):
@@ -246,15 +331,29 @@ def render_transaction_table(tab_df: pd.DataFrame, tab_key: str):
 
 
 # --- Tabs ---
-tab_received, tab_spent = st.tabs([
-    f"Received Funds ({len(received_df)})",
-    f"Spent Funds ({len(spent_df)})",
+tab_mac_recv, tab_mac_spent, tab_necgc_recv, tab_necgc_spent, tab_nec_recv, tab_nec_spent = st.tabs([
+    f"MAC-Received ({len(mac_received)})",
+    f"MAC-Spent ({len(mac_spent)})",
+    f"NECGC-Received ({len(necgc_received)})",
+    f"NECGC-Spent ({len(necgc_spent)})",
+    f"NECTECH-Received ({len(nec_received)})",
+    f"NECTECH-Spent ({len(nec_spent)})",
 ])
 
-with tab_received:
-    st.session_state.active_tab = "received"
-    render_transaction_table(received_df, "received")
+with tab_mac_recv:
+    render_transaction_table(mac_received, "mac_received")
 
-with tab_spent:
-    st.session_state.active_tab = "spent"
-    render_transaction_table(spent_df, "spent")
+with tab_mac_spent:
+    render_transaction_table(mac_spent, "mac_spent")
+
+with tab_necgc_recv:
+    render_transaction_table(necgc_received, "necgc_received")
+
+with tab_necgc_spent:
+    render_transaction_table(necgc_spent, "necgc_spent")
+
+with tab_nec_recv:
+    render_transaction_table(nec_received, "nec_received")
+
+with tab_nec_spent:
+    render_transaction_table(nec_spent, "nec_spent")
