@@ -518,8 +518,11 @@ def parse_ezidebit_pdf(file_content: bytes) -> list[dict]:
                         continue
 
                     # Settlement date (DD/MM/YYYY → YYYY-MM-DD)
+                    # Rows with "Paid" but no settlement date are still pending
+                    # and may fail — skip them.
                     sd_idx = col_map.get("settlement_date", 1)
-                    settlement_raw = str(row[sd_idx] if sd_idx < len(row) else "" or "").strip()
+                    sd_val = row[sd_idx] if sd_idx < len(row) else None
+                    settlement_raw = str(sd_val).strip() if sd_val else ""
                     if not settlement_raw:
                         continue
                     try:

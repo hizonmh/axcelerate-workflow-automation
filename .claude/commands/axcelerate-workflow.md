@@ -250,7 +250,8 @@ Step 1: Import bank files into tracker
    → Upload bank CSV, Xero Excel, or Ezidebit PDF files via the UI
    → Parsers auto-detect instance from bank account name
    → Reconciler auto-classifies student + payment method
-   → Ezidebit PDFs: only "Paid" rows imported, auto-set to "OK to Upload"
+   → Ezidebit PDFs: only "Paid" rows with a settlement date imported, auto-set to "OK to Upload"
+   → (Pending rows without settlement date are excluded — they can still fail)
 
 Step 2: Review and reconcile in tracker UI (7 tabs)
    → MAC-Received / MAC-Spent

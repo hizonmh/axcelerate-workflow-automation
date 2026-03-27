@@ -214,7 +214,7 @@ Each transaction is tagged with an `instance` code based on its bank account:
 
 **Ezidebit PDF files** (`parse_ezidebit_pdf()` in `parsers.py`):
 - Parsed via `pdfplumber` with text-based table extraction
-- Only "Paid" rows are imported (failed/declined are skipped)
+- Only "Paid" rows **with a settlement date** are imported (failed/declined and pending rows without a settlement date are skipped — pending payments can still fail after a few days)
 - Instance is always `EZIDEBIT`; uploads use MAC API credentials
 - Location (campus) is extracted from PDF header text (e.g., "Macallan College - Brisbane" → "Brisbane")
 - Transactions import directly as "OK to Upload" status
@@ -222,7 +222,7 @@ Each transaction is tagged with an `instance` code based on its bank account:
 
 ### How It Works
 
-1. **Import** — Upload bank CSV, Xero Excel, or Ezidebit PDF files via the Streamlit UI. The parsers auto-detect format and instance, run reconciliation to populate student and payment method, and upsert into SQLite (deduplication by date+amount+normalized payer+account). Ezidebit PDFs are parsed for "Paid" transactions only, with student pre-populated from Client Contract Ref and status set directly to "OK to Upload". When multiple transactions share the same dedup key (e.g. an agent paying the same amount for two different students on the same day), the parsers append sequence numbers (`|2`, `|3`, …) in file order to ensure all transactions are preserved.
+1. **Import** — Upload bank CSV, Xero Excel, or Ezidebit PDF files via the Streamlit UI. The parsers auto-detect format and instance, run reconciliation to populate student and payment method, and upsert into SQLite (deduplication by date+amount+normalized payer+account). Ezidebit PDFs are parsed for "Paid" transactions that have a settlement date (pending payments without a settlement date are excluded), with student pre-populated from Client Contract Ref and status set directly to "OK to Upload". When multiple transactions share the same dedup key (e.g. an agent paying the same amount for two different students on the same day), the parsers append sequence numbers (`|2`, `|3`, …) in file order to ensure all transactions are preserved.
 2. **Review** — Each instance has Received and Spent tabs. Filter by status, payment method, bank account, and student. Search across payer names, references, and descriptions. Select rows and bulk-edit student, status, or payment method.
 3. **Mark for Upload** — Set transaction status to "OK to Upload" for rows ready to push to Axcelerate.
 4. **Upload** — Use the per-instance upload buttons in the "Upload to Axcelerate" expander, which runs `bulk_payment.py --instance <CODE>` to read "OK to Upload" rows for that instance and record them via the correct Axcelerate API credentials.

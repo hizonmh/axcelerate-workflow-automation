@@ -195,7 +195,7 @@ Bank CSV / Xero Excel / Ezidebit PDF
 | Combined bank CSV | `parse_combined_bank_csv()` | Multi-bank merged file with Source.Name header |
 | Single bank CSV | `parse_bank_csv()` | Per-bank CSV (8 columns, no header, DD/MM/YYYY dates) |
 | Xero Excel | `parse_xero_excel()` | Bank Reconciliation export (.xlsx), reads "Bank Statement" tab |
-| Ezidebit PDF | `parse_ezidebit_pdf()` | Processed Payments Report PDF. Only "Paid" rows imported with status "OK to Upload". Location extracted from header (e.g. "Macallan College - Brisbane") |
+| Ezidebit PDF | `parse_ezidebit_pdf()` | Processed Payments Report PDF. Only "Paid" rows with a settlement date are imported (pending rows without settlement date are skipped). Status set to "OK to Upload". Location extracted from header (e.g. "Macallan College - Brisbane") |
 
 ### Transaction Statuses (Tracker)
 
