@@ -314,10 +314,11 @@ The primary bulk payment workflow uses `bulk_payment.py`, which reads from the B
 
 ```bash
 # Run from project root — select instance with --instance flag
-python bulk_payment.py                  # Default: MAC
-python bulk_payment.py --instance MAC   # Macallan College
-python bulk_payment.py --instance NECGC # NEC Gold Coast
-python bulk_payment.py --instance NEC   # NEC Melbourne (NECTECH)
+python bulk_payment.py                      # Default: MAC
+python bulk_payment.py --instance MAC       # Macallan College
+python bulk_payment.py --instance NECGC     # NEC Gold Coast
+python bulk_payment.py --instance NEC       # NEC Melbourne (NECTECH)
+python bulk_payment.py --instance EZIDEBIT  # Ezidebit direct debits (uses MAC credentials)
 ```
 
 The tracker app's "Upload to Axcelerate" section has per-instance buttons that invoke this script automatically.

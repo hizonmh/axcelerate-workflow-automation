@@ -247,23 +247,25 @@ This is the end-to-end payment processing pipeline using the Bank Transaction Tr
 ```
 Step 1: Import bank files into tracker
    → Run: cd tracker && streamlit run app.py
-   → Upload bank CSV or Xero Excel files via the UI
+   → Upload bank CSV, Xero Excel, or Ezidebit PDF files via the UI
    → Parsers auto-detect instance from bank account name
    → Reconciler auto-classifies student + payment method
+   → Ezidebit PDFs: only "Paid" rows imported, auto-set to "OK to Upload"
 
-Step 2: Review and reconcile in tracker UI (6 tabs)
+Step 2: Review and reconcile in tracker UI (7 tabs)
    → MAC-Received / MAC-Spent
    → NECGC-Received / NECGC-Spent
    → NECTECH-Received / NECTECH-Spent
+   → MAC-EZIDEBIT (Ezidebit direct debit payments, uses MAC credentials)
    → Filter by status (Unreconciled), search by name/reference
    → Select rows → set Student ID, Payment Method, Status
    → Mark reviewed rows as "OK to Upload"
 
 Step 3: Upload to Axcelerate (per-instance)
    → Use the "Upload to Axcelerate" expander in the tracker UI
-   → Each instance has its own upload button (MAC, NECGC, NECTECH)
-   → Or run manually: python bulk_payment.py --instance <MAC|NECGC|NEC>
-   → Uses instance-specific API credentials from .env
+   → Each instance has its own upload button (MAC, NECGC, NECTECH, MAC-EZIDEBIT)
+   → Or run manually: python bulk_payment.py --instance <MAC|NECGC|NEC|EZIDEBIT>
+   → Uses instance-specific API credentials from .env (EZIDEBIT uses MAC credentials)
    → Reads "OK to Upload" rows for that instance from tracker DB
    → Resolves contact IDs (numeric or MAC ID lookup)
    → Finds matching invoices (amount match)
@@ -275,10 +277,10 @@ Step 3: Upload to Axcelerate (per-instance)
 **Key files:**
 | File | Role |
 |------|------|
-| `tracker/app.py` | Streamlit UI — 6-tab layout with per-instance upload |
-| `tracker/parsers.py` | Bank CSV + Xero Excel parsers with instance-aware account mapping |
+| `tracker/app.py` | Streamlit UI — 7-tab layout with per-instance upload (includes MAC-EZIDEBIT) |
+| `tracker/parsers.py` | Bank CSV, Xero Excel, and Ezidebit PDF parsers with instance-aware account mapping |
 | `tracker/reconciler.py` | Auto-classification engine |
-| `tracker/database.py` | SQLite storage with dedup and `instance` column |
+| `tracker/database.py` | SQLite storage with dedup, `instance` and `location` columns |
 | `bulk_payment.py` | Multi-instance Axcelerate API payment uploader (`--instance` flag) |
 
 ---

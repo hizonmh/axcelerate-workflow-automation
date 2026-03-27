@@ -28,15 +28,16 @@ load_dotenv()
 
 # --- Instance selection ---
 parser = argparse.ArgumentParser(description="Bulk payment uploader for Axcelerate")
-parser.add_argument("--instance", default="MAC", choices=["MAC", "NECGC", "NEC"],
+parser.add_argument("--instance", default="MAC", choices=["MAC", "NECGC", "NEC", "EZIDEBIT"],
                     help="Which Axcelerate instance to upload to (default: MAC)")
 args = parser.parse_args()
 instance = args.instance
 
 INSTANCE_CREDS = {
-    "MAC":   ("AXCELERATE_API_TOKEN", "AXCELERATE_WS_TOKEN", "AXCELERATE_BASE_URL"),
-    "NECGC": ("NECGC_API_TOKEN",     "NECGC_WS_TOKEN",      "NECGC_BASE_URL"),
-    "NEC":   ("NEC_API_TOKEN",        "NEC_WS_TOKEN",         "NEC_BASE_URL"),
+    "MAC":      ("AXCELERATE_API_TOKEN", "AXCELERATE_WS_TOKEN", "AXCELERATE_BASE_URL"),
+    "NECGC":    ("NECGC_API_TOKEN",     "NECGC_WS_TOKEN",      "NECGC_BASE_URL"),
+    "NEC":      ("NEC_API_TOKEN",        "NEC_WS_TOKEN",         "NEC_BASE_URL"),
+    "EZIDEBIT": ("AXCELERATE_API_TOKEN", "AXCELERATE_WS_TOKEN", "AXCELERATE_BASE_URL"),
 }
 
 token_key, ws_key, url_key = INSTANCE_CREDS[instance]

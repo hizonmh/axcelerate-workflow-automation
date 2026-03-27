@@ -1,8 +1,10 @@
 import csv
 import re
 import io
+import os
 from datetime import datetime
 import openpyxl
+import pdfplumber
 from reconciler import reconcile_transaction, PAYMENT_FROM_AGENTS
 
 # Bank account → instance mapping for CSV files (filename-derived account names).
@@ -50,6 +52,8 @@ def _extract_payer_from_description(description: str) -> str:
     # Remove "PAYMENT FROM" / "TRANSFER FROM" prefix to get the name
     text = re.sub(r"^PAYMENT\s+FROM\s+", "", text, flags=re.IGNORECASE)
     text = re.sub(r"^TRANSFER\s+FROM\s+", "", text, flags=re.IGNORECASE)
+    # Strip extra info after whitespace padding (2+ spaces) to match Xero dedup
+    text = re.split(r"\s{2,}", text)[0]
     return text
 
 
@@ -69,6 +73,34 @@ def _make_dedup_key(date_str: str, amount: float, payer_raw: str, bank_account: 
     if norm:
         return f"{acct}|{date_str}|{amount}|{norm}"
     return f"{acct}|{date_str}|{amount}"
+
+
+def _resolve_duplicate_dedup_keys(records: list[dict]) -> list[dict]:
+    """Append sequence numbers to duplicate dedup keys within a batch.
+
+    When the same payer sends multiple payments of the same amount on the same
+    day (e.g. an agent paying for two different students), the base dedup key
+    is identical.  This function detects such collisions and appends |2, |3, …
+    to the duplicates so each transaction gets a unique key.  The first
+    occurrence keeps its original key for backward compatibility with existing
+    DB rows.  Sequence is based on file order (the order records appear in the
+    source file), which is stable across re-imports of the same file.
+    """
+    from collections import defaultdict
+
+    # Group record indices by their dedup_key (preserves file order)
+    groups: dict[str, list[int]] = defaultdict(list)
+    for idx, rec in enumerate(records):
+        groups[rec["dedup_key"]].append(idx)
+
+    for key, indices in groups.items():
+        if len(indices) < 2:
+            continue
+        # First occurrence keeps the original key; subsequent ones get |2, |3, …
+        for seq, i in enumerate(indices[1:], start=2):
+            records[i]["dedup_key"] = f"{key}|{seq}"
+
+    return records
 
 
 def _bank_account_from_filename(filename: str) -> str:
@@ -179,7 +211,7 @@ def parse_combined_bank_csv(file_content: bytes | str) -> list[dict]:
 
         i += 1
 
-    return records
+    return _resolve_duplicate_dedup_keys(records)
 
 
 def parse_bank_csv(file_content: bytes | str, bank_account: str = "") -> list[dict]:
@@ -259,7 +291,7 @@ def parse_bank_csv(file_content: bytes | str, bank_account: str = "") -> list[di
             "dedup_key": _make_dedup_key(date_str, amount, dedup_source, bank_account),
         })
 
-    return records
+    return _resolve_duplicate_dedup_keys(records)
 
 
 def parse_xero_excel(file_content: bytes) -> list[dict]:
@@ -383,6 +415,12 @@ def parse_xero_excel(file_content: bytes) -> list[dict]:
             amount=amount,
         )
 
+        # For dedup, extract only the core payer name — Xero descriptions embed
+        # extra info after whitespace padding (e.g. "Edugo                      Admin fee
+        # Pinthip songngam").  Split on 2+ consecutive spaces and take the first part
+        # so the dedup key matches the clean payer field from Bank CSV.
+        dedup_payer = re.split(r"\s{2,}", description_raw)[0] if description_raw else ""
+
         records.append({
             "date": date_str,
             "amount": amount,
@@ -395,11 +433,140 @@ def parse_xero_excel(file_content: bytes) -> list[dict]:
             "instance": instance,
             "student": recon["student"],
             "payment_method": recon["payment_method"],
-            "dedup_key": _make_dedup_key(date_str, amount, payer_name, bank_account),
+            "dedup_key": _make_dedup_key(date_str, amount, dedup_payer, bank_account),
         })
 
     wb.close()
-    return records
+    return _resolve_duplicate_dedup_keys(records)
+
+
+def _extract_ezidebit_location(pdf_text: str) -> str:
+    """Extract campus location from PDF text (e.g. 'Macallan College - Brisbane' → 'Brisbane')."""
+    match = re.search(r"Macallan\s+College\s*-\s*(\w+)", pdf_text, re.IGNORECASE)
+    if match:
+        return match.group(1)
+    return ""
+
+
+def parse_ezidebit_pdf(file_content: bytes) -> list[dict]:
+    """Parse Ezidebit Processed Payments Report PDF.
+
+    Extracts only rows with Result = 'Paid'. Fields mapped:
+      Settlement Date → date (YYYY-MM-DD)
+      Client Contract Ref → student (contactID or optionalID)
+      Payment Amt → amount
+      bank_account = 'EZIDEBIT'
+      payment_method = 'Direct Debit'
+      instance = 'EZIDEBIT'
+      status = 'OK to Upload'
+    """
+    records = []
+
+    table_settings = {
+        "vertical_strategy": "text",
+        "horizontal_strategy": "text",
+    }
+
+    with pdfplumber.open(io.BytesIO(file_content)) as pdf:
+        # Extract location from first page text (e.g. "Macallan College - Brisbane")
+        location = _extract_ezidebit_location(pdf.pages[0].extract_text() or "") if pdf.pages else ""
+
+        for page in pdf.pages:
+            tables = page.extract_tables(table_settings)
+            if not tables:
+                continue
+
+            for table in tables:
+                # Find header row to locate column indices
+                header_idx = None
+                col_map = {}
+                for i, row in enumerate(table):
+                    cells = [str(c).strip().lower() if c else "" for c in row]
+                    joined = " ".join(cells)
+                    if "trans" in joined and "result" in joined and "settlement" in joined:
+                        header_idx = i
+                        for j, cell in enumerate(cells):
+                            if "settlement" in cell:
+                                col_map["settlement_date"] = j
+                            elif "trans" in cell and "date" in cell:
+                                col_map["trans_date"] = j
+                            elif "client contract" in cell:
+                                col_map["client_contract_ref"] = j
+                            elif cell == "result":
+                                col_map["result"] = j
+                            elif "ment amt" in cell or "payment amt" in cell:
+                                # Handles split "Pay" / "ment Amt" across columns
+                                col_map["payment_amt"] = j
+                            elif "payer name" in cell:
+                                col_map["payer_name"] = j
+                        break
+
+                if header_idx is None or "result" not in col_map:
+                    continue
+
+                # Process data rows after header
+                for row in table[header_idx + 1:]:
+                    if not row:
+                        continue
+
+                    # Skip empty/spacer rows
+                    result_idx = col_map["result"]
+                    if result_idx >= len(row):
+                        continue
+                    result = str(row[result_idx] or "").strip()
+                    if result != "Paid":
+                        continue
+
+                    # Settlement date (DD/MM/YYYY → YYYY-MM-DD)
+                    sd_idx = col_map.get("settlement_date", 1)
+                    settlement_raw = str(row[sd_idx] if sd_idx < len(row) else "" or "").strip()
+                    if not settlement_raw:
+                        continue
+                    try:
+                        date_obj = datetime.strptime(settlement_raw, "%d/%m/%Y")
+                        date_str = date_obj.strftime("%Y-%m-%d")
+                    except ValueError:
+                        continue
+
+                    # Client Contract Ref → student
+                    ccr_idx = col_map.get("client_contract_ref", 4)
+                    student = str(row[ccr_idx] if ccr_idx < len(row) else "" or "").strip()
+                    if not student:
+                        continue
+
+                    # Payment Amt (strip $ and commas)
+                    pa_idx = col_map.get("payment_amt", 7)
+                    amt_raw = str(row[pa_idx] if pa_idx < len(row) else "" or "").strip()
+                    amt_raw = amt_raw.replace("$", "").replace(",", "")
+                    try:
+                        amount = float(amt_raw)
+                    except ValueError:
+                        continue
+
+                    # Payer name (optional, for reference)
+                    pn_idx = col_map.get("payer_name", 3)
+                    payer = str(row[pn_idx] if pn_idx < len(row) else "" or "").strip()
+
+                    dedup_key = f"ezidebit|{date_str}|{amount}|{student}"
+
+                    records.append({
+                        "date": date_str,
+                        "amount": amount,
+                        "description": f"Ezidebit Direct Debit - {payer}" if payer else "Ezidebit Direct Debit",
+                        "payer_name": payer,
+                        "reference": student,
+                        "payment_note": "",
+                        "source": "Ezidebit",
+                        "bank_account": "EZIDEBIT",
+                        "instance": "EZIDEBIT",
+                        "location": location,
+                        "student": student,
+                        "payment_method": "Direct Debit",
+                        "status": "OK to Upload",
+                        "dedup_key": dedup_key,
+                    })
+
+    return _resolve_duplicate_dedup_keys(records)
 
 
 def detect_and_parse(filename: str, content: bytes) -> list[dict]:
@@ -410,5 +577,7 @@ def detect_and_parse(filename: str, content: bytes) -> list[dict]:
         return parse_bank_csv(content, bank_account=bank_account)
     elif lower.endswith(".xlsx"):
         return parse_xero_excel(content)
+    elif lower.endswith(".pdf"):
+        return parse_ezidebit_pdf(content)
     else:
-        raise ValueError(f"Unsupported file type: {filename}. Use .csv or .xlsx")
+        raise ValueError(f"Unsupported file type: {filename}. Use .csv, .xlsx, or .pdf")

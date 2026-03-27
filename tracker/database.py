@@ -51,6 +51,11 @@ def init_db():
         conn.execute("SELECT instance FROM transactions LIMIT 1")
     except Exception:
         conn.execute("ALTER TABLE transactions ADD COLUMN instance TEXT NOT NULL DEFAULT 'MAC'")
+    # Migration: add location column if missing (for Ezidebit campus segregation)
+    try:
+        conn.execute("SELECT location FROM transactions LIMIT 1")
+    except Exception:
+        conn.execute("ALTER TABLE transactions ADD COLUMN location TEXT NOT NULL DEFAULT ''")
     conn.commit()
     conn.close()
 
@@ -74,12 +79,16 @@ def upsert_transactions(records: list[dict]) -> dict:
         if existing is None:
             # New record — insert
             method = rec.get("payment_method", "Direct Deposit")
-            no_action_methods = {"Direct Debit", "Stripe", "Internal Transfer"}
-            status = "No Action" if method in no_action_methods else "Unreconciled"
+            # Allow parser to override status (e.g. Ezidebit sets "OK to Upload")
+            if "status" in rec:
+                status = rec["status"]
+            else:
+                no_action_methods = {"Direct Debit", "Stripe", "Internal Transfer"}
+                status = "No Action" if method in no_action_methods else "Unreconciled"
             cur.execute(
                 """INSERT INTO transactions
-                   (date, amount, description, payer_name, reference, payment_note, source, bank_account, student, status, payment_method, dedup_key, created_at, instance)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (date, amount, description, payer_name, reference, payment_note, source, bank_account, student, status, payment_method, dedup_key, created_at, instance, location)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     rec["date"],
                     rec["amount"],
@@ -95,6 +104,7 @@ def upsert_transactions(records: list[dict]) -> dict:
                     rec["dedup_key"],
                     datetime.now().isoformat(),
                     rec.get("instance", "MAC"),
+                    rec.get("location", ""),
                 ),
             )
             inserted += 1

@@ -140,7 +140,7 @@ Reconciliation is implemented in the **Bank Transaction Tracker** app (`tracker/
 | File | Purpose |
 |------|---------|
 | `tracker/reconciler.py` | Core reconciliation engine — `reconcile_transaction()`, `classify_payment_method()`, `extract_student()` |
-| `tracker/parsers.py` | File parsers — bank CSV (single + combined multi-bank) and Xero Excel. Calls reconciler automatically on import |
+| `tracker/parsers.py` | File parsers — bank CSV (single + combined multi-bank), Xero Excel, and Ezidebit PDF. Calls reconciler automatically on import |
 | `tracker/database.py` | SQLite database — stores transactions with deduplication, status tracking, bulk updates |
 | `tracker/app.py` | Streamlit web UI — import files, review/edit reconciled transactions, mark for upload |
 | `bulk_payment.py` | Upstream: reads "OK to Upload" rows from tracker DB and records payments in Axcelerate |
@@ -173,17 +173,18 @@ Transactions are automatically tagged with an `instance` code based on bank acco
 | Adelaide, Brisbane Cheque/Prepaid, Adelaide Prepaid | MAC | MAC |
 | GC Cheque, GC Prepaid | NECGC | NECGC |
 | Melbourne Cheque, Melbourne Prepaid | NEC | NECTECH |
+| EZIDEBIT (from Ezidebit PDF reports) | EZIDEBIT | MAC-EZIDEBIT |
 
 Account-to-instance mapping is defined in `parsers.py` via `BANK_ACCOUNT_INSTANCE` (for CSV) and `XERO_ACCOUNT_MAP` (for Xero Excel).
 
 ### Data Flow
 
 ```
-Bank CSV / Xero Excel
+Bank CSV / Xero Excel / Ezidebit PDF
     ↓ parsers.py (detect_and_parse, auto-detect instance from account)
-    ↓ reconciler.py (auto-classify student + method)
-    ↓ database.py (upsert with dedup, instance column)
-    ↓ app.py (6-tab Streamlit UI: MAC/NECGC/NECTECH × Received/Spent)
+    ↓ reconciler.py (auto-classify student + method; Ezidebit pre-populated)
+    ↓ database.py (upsert with dedup, instance + location columns)
+    ↓ app.py (7-tab Streamlit UI: MAC/NECGC/NECTECH × Received/Spent + MAC-EZIDEBIT)
     ↓ bulk_payment.py --instance <CODE> (upload to correct Axcelerate instance)
 ```
 
@@ -194,6 +195,7 @@ Bank CSV / Xero Excel
 | Combined bank CSV | `parse_combined_bank_csv()` | Multi-bank merged file with Source.Name header |
 | Single bank CSV | `parse_bank_csv()` | Per-bank CSV (8 columns, no header, DD/MM/YYYY dates) |
 | Xero Excel | `parse_xero_excel()` | Bank Reconciliation export (.xlsx), reads "Bank Statement" tab |
+| Ezidebit PDF | `parse_ezidebit_pdf()` | Processed Payments Report PDF. Only "Paid" rows imported with status "OK to Upload". Location extracted from header (e.g. "Macallan College - Brisbane") |
 
 ### Transaction Statuses (Tracker)
 

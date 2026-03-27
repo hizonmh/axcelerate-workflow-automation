@@ -180,17 +180,17 @@ claude mcp add axcelerate -- python axcelerate-mcp-server/server.py
 
 ## Bank Transaction Tracker
 
-The `tracker/` directory contains a Streamlit web app for importing, reconciling, and managing bank transactions before uploading them to Axcelerate. It supports **three Axcelerate instances** (MAC, NECGC, NECTECH) with 6 tabs (Received/Spent per instance).
+The `tracker/` directory contains a Streamlit web app for importing, reconciling, and managing bank transactions before uploading them to Axcelerate. It supports **three Axcelerate instances** (MAC, NECGC, NECTECH) with 7 tabs (Received/Spent per instance + MAC-EZIDEBIT for direct debit payments).
 
 ### Components
 
 | File | Purpose |
 |------|---------|
-| `tracker/app.py` | Streamlit UI — 6-tab layout (MAC/NECGC/NECTECH × Received/Spent), import files, filter/search, bulk edit, per-instance upload |
-| `tracker/database.py` | SQLite database layer — `transactions` table with `instance` column, upsert, bulk update, stats |
-| `tracker/parsers.py` | File parsers — bank CSV (single + combined multi-bank) and Xero Excel. Instance-aware account mapping |
+| `tracker/app.py` | Streamlit UI — 7-tab layout (MAC/NECGC/NECTECH × Received/Spent + MAC-EZIDEBIT), import files, filter/search, bulk edit, per-instance upload |
+| `tracker/database.py` | SQLite database layer — `transactions` table with `instance` and `location` columns, upsert, bulk update, stats |
+| `tracker/parsers.py` | File parsers — bank CSV (single + combined multi-bank), Xero Excel, and Ezidebit PDF. Instance-aware account mapping. Dedup collision resolution for same-payer/same-amount transactions |
 | `tracker/reconciler.py` | Reconciliation engine — classifies payment method and extracts student from transaction data |
-| `tracker/requirements.txt` | Dependencies: `streamlit`, `pandas`, `openpyxl` |
+| `tracker/requirements.txt` | Dependencies: `streamlit`, `pandas`, `openpyxl`, `pdfplumber` |
 | `tracker/tracker.db` | SQLite database (gitignored — contains real transaction data) |
 
 ### Multi-Instance Architecture
@@ -202,6 +202,7 @@ Each transaction is tagged with an `instance` code based on its bank account:
 | Adelaide, Brisbane Cheque, Brisbane Prepaid, Adelaide Prepaid | MAC | MAC |
 | GC Cheque, GC Prepaid | NECGC | NECGC |
 | Melbourne Cheque, Melbourne Prepaid | NEC | NECTECH |
+| EZIDEBIT (from Ezidebit PDF reports) | EZIDEBIT | MAC-EZIDEBIT |
 
 **Account mapping for bank CSV files** (`BANK_ACCOUNT_INSTANCE` in `parsers.py`):
 - Account names are derived from CSV filenames (e.g., `GC Cheque.csv` → `GC Cheque`)
@@ -211,9 +212,17 @@ Each transaction is tagged with an `instance` code based on its bank account:
 - Row 4, Column A in the "Bank Statement" tab contains the account identifier
 - Exact-match lookup against the mapping dict; falls back to `split(" - ")[0]` for MAC accounts
 
+**Ezidebit PDF files** (`parse_ezidebit_pdf()` in `parsers.py`):
+- Parsed via `pdfplumber` with text-based table extraction
+- Only "Paid" rows are imported (failed/declined are skipped)
+- Instance is always `EZIDEBIT`; uploads use MAC API credentials
+- Location (campus) is extracted from PDF header text (e.g., "Macallan College - Brisbane" → "Brisbane")
+- Transactions import directly as "OK to Upload" status
+- The `location` column on the `transactions` table stores the campus code (BNE, SYD, PER, ADL) for future data segregation
+
 ### How It Works
 
-1. **Import** — Upload bank CSV or Xero Excel files via the Streamlit UI. The parsers auto-detect format and instance, run reconciliation to populate student and payment method, and upsert into SQLite (deduplication by date+amount+payer+account).
+1. **Import** — Upload bank CSV, Xero Excel, or Ezidebit PDF files via the Streamlit UI. The parsers auto-detect format and instance, run reconciliation to populate student and payment method, and upsert into SQLite (deduplication by date+amount+normalized payer+account). Ezidebit PDFs are parsed for "Paid" transactions only, with student pre-populated from Client Contract Ref and status set directly to "OK to Upload". When multiple transactions share the same dedup key (e.g. an agent paying the same amount for two different students on the same day), the parsers append sequence numbers (`|2`, `|3`, …) in file order to ensure all transactions are preserved.
 2. **Review** — Each instance has Received and Spent tabs. Filter by status, payment method, bank account, and student. Search across payer names, references, and descriptions. Select rows and bulk-edit student, status, or payment method.
 3. **Mark for Upload** — Set transaction status to "OK to Upload" for rows ready to push to Axcelerate.
 4. **Upload** — Use the per-instance upload buttons in the "Upload to Axcelerate" expander, which runs `bulk_payment.py --instance <CODE>` to read "OK to Upload" rows for that instance and record them via the correct Axcelerate API credentials.
@@ -246,10 +255,11 @@ streamlit run app.py
 The script accepts an `--instance` argument to select which Axcelerate instance to upload to:
 
 ```bash
-python bulk_payment.py                  # Default: MAC
-python bulk_payment.py --instance MAC   # Macallan College
-python bulk_payment.py --instance NECGC # NEC Gold Coast
-python bulk_payment.py --instance NEC   # NEC Melbourne (NECTECH)
+python bulk_payment.py                      # Default: MAC
+python bulk_payment.py --instance MAC       # Macallan College
+python bulk_payment.py --instance NECGC     # NEC Gold Coast
+python bulk_payment.py --instance NEC       # NEC Melbourne (NECTECH)
+python bulk_payment.py --instance EZIDEBIT  # Ezidebit direct debits (uses MAC credentials)
 ```
 
 Each instance uses its own API credentials from `.env` (see Instance Credential Mapping above). The SQL query filters by `instance` column to only process transactions for the selected instance.

@@ -20,11 +20,30 @@ if "table_key" not in st.session_state:
 
 st.markdown("### Bank Transaction Tracker")
 
+# --- Unreconciled summary ---
+from database import get_connection
+_summary_conn = get_connection()
+_unreconciled_counts = {}
+for _inst_code, _inst_label in [("MAC", "MAC"), ("NECGC", "NECGC"), ("NEC", "NECTECH"), ("EZIDEBIT", "EZIDEBIT")]:
+    row = _summary_conn.execute(
+        "SELECT COUNT(*) as cnt, COALESCE(SUM(amount), 0) as total FROM transactions WHERE status = 'Unreconciled' AND amount > 0 AND instance = ?",
+        (_inst_code,),
+    ).fetchone()
+    _unreconciled_counts[_inst_label] = {"count": row[0], "total": row[1]}
+_summary_conn.close()
+
+_total_unrec = sum(v["count"] for v in _unreconciled_counts.values())
+if _total_unrec > 0:
+    col_s1, col_s2, col_s3, col_s4 = st.columns(4)
+    for col, (label, data) in zip([col_s1, col_s2, col_s3, col_s4], _unreconciled_counts.items()):
+        with col:
+            st.metric(label=f"{label} Unreconciled", value=data["count"], delta=f"${data['total']:,.2f}", delta_color="off")
+
 # --- Import section (expandable) ---
 with st.expander("Import Transactions"):
     uploaded_files = st.file_uploader(
-        "Drop bank CSV or Xero Excel files",
-        type=["csv", "xlsx"],
+        "Drop bank CSV, Xero Excel, or Ezidebit PDF files",
+        type=["csv", "xlsx", "pdf"],
         accept_multiple_files=True,
         key=f"file_uploader_{st.session_state.uploader_key}",
     )
@@ -113,9 +132,11 @@ with st.expander("Upload to Axcelerate"):
         _upload_panel("MAC", "MAC")
     with col_u2:
         _upload_panel("NECGC", "NECGC")
-    col_u3, _ = st.columns(2)
+    col_u3, col_u4 = st.columns(2)
     with col_u3:
         _upload_panel("NECTECH", "NEC")
+    with col_u4:
+        _upload_panel("MAC-EZIDEBIT", "EZIDEBIT")
 
 # Load data
 all_txns = get_all_transactions()
@@ -130,6 +151,7 @@ _instance_col = df["instance"] if "instance" in df.columns else pd.Series("MAC",
 mac_df = df[_instance_col == "MAC"]
 necgc_df = df[_instance_col == "NECGC"]
 nec_df = df[_instance_col == "NEC"]
+ezidebit_df = df[_instance_col == "EZIDEBIT"]
 
 mac_received = mac_df[mac_df["amount"] > 0].copy()
 mac_spent = mac_df[mac_df["amount"] < 0].copy()
@@ -137,6 +159,7 @@ necgc_received = necgc_df[necgc_df["amount"] > 0].copy()
 necgc_spent = necgc_df[necgc_df["amount"] < 0].copy()
 nec_received = nec_df[nec_df["amount"] > 0].copy()
 nec_spent = nec_df[nec_df["amount"] < 0].copy()
+ezidebit_received = ezidebit_df[ezidebit_df["amount"] > 0].copy()
 
 
 def render_transaction_table(tab_df: pd.DataFrame, tab_key: str):
@@ -331,29 +354,33 @@ def render_transaction_table(tab_df: pd.DataFrame, tab_key: str):
 
 
 # --- Tabs ---
-tab_mac_recv, tab_mac_spent, tab_necgc_recv, tab_necgc_spent, tab_nec_recv, tab_nec_spent = st.tabs([
+tab_mac_recv, tab_necgc_recv, tab_nec_recv, tab_ezidebit, tab_mac_spent, tab_necgc_spent, tab_nec_spent = st.tabs([
     f"MAC-Received ({len(mac_received)})",
-    f"MAC-Spent ({len(mac_spent)})",
     f"NECGC-Received ({len(necgc_received)})",
-    f"NECGC-Spent ({len(necgc_spent)})",
     f"NECTECH-Received ({len(nec_received)})",
+    f"MAC-EZIDEBIT ({len(ezidebit_received)})",
+    f"MAC-Spent ({len(mac_spent)})",
+    f"NECGC-Spent ({len(necgc_spent)})",
     f"NECTECH-Spent ({len(nec_spent)})",
 ])
 
 with tab_mac_recv:
     render_transaction_table(mac_received, "mac_received")
 
-with tab_mac_spent:
-    render_transaction_table(mac_spent, "mac_spent")
-
 with tab_necgc_recv:
     render_transaction_table(necgc_received, "necgc_received")
 
-with tab_necgc_spent:
-    render_transaction_table(necgc_spent, "necgc_spent")
-
 with tab_nec_recv:
     render_transaction_table(nec_received, "nec_received")
+
+with tab_ezidebit:
+    render_transaction_table(ezidebit_received, "ezidebit_received")
+
+with tab_mac_spent:
+    render_transaction_table(mac_spent, "mac_spent")
+
+with tab_necgc_spent:
+    render_transaction_table(necgc_spent, "necgc_spent")
 
 with tab_nec_spent:
     render_transaction_table(nec_spent, "nec_spent")
