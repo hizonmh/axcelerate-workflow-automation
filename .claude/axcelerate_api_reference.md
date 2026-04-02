@@ -898,7 +898,7 @@ All endpoints require two HTTP headers:
 |-------------------|----------|--------------------------------------------------------------|
 | `invoiceID`       | numeric  | Apply transaction to specific invoice                        |
 | `paymentMethodID` | numeric  | 1=Cash, 2=Credit Card (default), 4=Direct Deposit, 5=Cheque, 6=EFTPOS |
-| `transDate`       | datetime | Transaction date/time (default: now)                         |
+| `transDate`       | datetime | Transaction date/time in MM/DD/YYYY format (default: now)    |
 | `reference`       | string   | Reference/receipt number                                     |
 | `description`     | string   | Transaction description                                      |
 | `ChequeNr`        | string   | Cheque number (type 5 only)                                  |

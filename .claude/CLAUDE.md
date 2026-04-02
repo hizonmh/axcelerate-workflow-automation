@@ -83,7 +83,7 @@ Both tokens come from the Axcelerate admin panel. The base URL is instance-speci
 ## Key API Conventions
 
 - **POST encoding**: All `POST` and `PUT` requests must use **form encoding** (`data=`), NOT JSON (`json=`). Using JSON will silently fail or return incorrect defaults.
-- **Date format**: `DD/MM/YYYY` for most endpoints (some accept `YYYY-MM-DD` — verify in `.claude/axcelerate_api_reference.md`)
+- **Date format**: `DD/MM/YYYY` for most endpoints, but `transDate` on payment transactions uses `MM/DD/YYYY`. Some endpoints accept `YYYY-MM-DD` — verify in `.claude/axcelerate_api_reference.md`
 - **Error responses** include `error`, `code`, `messages`, and `details` fields; always call `raise_for_status()` in generated scripts
 - **IDs are numeric** except invoice GUIDs which are string UUIDs
 - **Pagination**: Reports and searches may return paginated results; use `page` and `perpage` parameters
@@ -186,10 +186,11 @@ The `tracker/` directory contains a Streamlit web app for importing, reconciling
 
 | File | Purpose |
 |------|---------|
-| `tracker/app.py` | Streamlit UI — 7-tab layout (MAC/NECGC/NECTECH × Received/Spent + MAC-EZIDEBIT), import files, filter/search, bulk edit, per-instance upload |
-| `tracker/database.py` | SQLite database layer — `transactions` table with `instance` and `location` columns, upsert, bulk update, stats |
+| `tracker/app.py` | Streamlit UI — 7-tab layout (MAC/NECGC/NECTECH × Received/Spent + MAC-EZIDEBIT), import files, filter/search, bulk edit, per-instance upload, agent commission calculator |
+| `tracker/database.py` | SQLite database layer — `transactions` and `agent_profiles` tables, upsert, bulk update, stats |
 | `tracker/parsers.py` | File parsers — bank CSV (single + combined multi-bank), Xero Excel, and Ezidebit PDF. Instance-aware account mapping. Dedup collision resolution for same-payer/same-amount transactions |
 | `tracker/reconciler.py` | Reconciliation engine — classifies payment method and extracts student from transaction data |
+| `tracker/agent_calculator.py` | Agent commission calculator — verifies agent deduction payments against expected amounts |
 | `tracker/requirements.txt` | Dependencies: `streamlit`, `pandas`, `openpyxl`, `pdfplumber` |
 | `tracker/tracker.db` | SQLite database (gitignored — contains real transaction data) |
 
@@ -238,6 +239,25 @@ Each transaction is tagged with an `instance` code based on its bank account:
 | `Check Manually` | Failed or needs manual intervention |
 | `No Action` | Auto-set for Direct Debit, Stripe, Internal Transfer (handled elsewhere) |
 
+### Agent Commission Calculator
+
+The tracker includes a built-in calculator for verifying agent deduction payments. Education agents pre-deduct their commissions from payments they transfer, and this tool checks if the amount received is correct.
+
+**How commission works:**
+- Commission is charged **only on tuition fees** (admin fees and material fees are not commission-eligible)
+- GST of 10% is applied on top of the commission
+- Top-tier agents may also pre-deduct an **admin fee waiver** and/or a **bonus**
+- Formula: `Expected Payment = Invoice Total - (Commission + GST + AF Waiver + Bonus)`
+
+**Agent Profiles** (`agent_profiles` table in SQLite):
+- Stores each agent's commission rate (30%, 35%, or 40%), admin fee waiver eligibility, bonus eligibility, and default bonus amount
+- Profiles persist across sessions — select an agent and their terms auto-fill in the calculator
+
+**Auto-fill from transaction table:**
+- Select a single Agent Deduction row in any transaction tab → click the "📐 Calculator" button
+- The payment amount is pre-filled and the payer name is matched against saved agent profiles
+- The calculator section auto-expands with the transaction context displayed
+
 ### Running the Tracker
 
 ```bash
@@ -280,7 +300,7 @@ The tracker app's "Upload to Axcelerate" section has per-instance buttons that c
 | Tracker Column | Axcelerate Field |
 |----------------|------------------|
 | `student` | `contactID` (numeric ID or MAC optionalID) |
-| `date` | `transDate` (converted from YYYY-MM-DD to DD/MM/YYYY) |
+| `date` | `transDate` (converted from YYYY-MM-DD to MM/DD/YYYY) |
 | `amount` | `amount` |
 | `payment_method` | `paymentMethodID` (mapped via METHOD_MAP) |
 | `bank_account` | `reference` and `description` |

@@ -56,6 +56,17 @@ def init_db():
         conn.execute("SELECT location FROM transactions LIMIT 1")
     except Exception:
         conn.execute("ALTER TABLE transactions ADD COLUMN location TEXT NOT NULL DEFAULT ''")
+    # Agent profiles table
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS agent_profiles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_name TEXT UNIQUE NOT NULL,
+            commission_rate REAL NOT NULL DEFAULT 0.30,
+            admin_fee_waiver INTEGER NOT NULL DEFAULT 0,
+            bonus_eligible INTEGER NOT NULL DEFAULT 0,
+            default_bonus REAL NOT NULL DEFAULT 0.0
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -203,6 +214,36 @@ def delete_all_transactions():
     """Delete all transactions from the database."""
     conn = get_connection()
     conn.execute("DELETE FROM transactions")
+    conn.commit()
+    conn.close()
+
+
+def get_agent_profiles() -> list[dict]:
+    conn = get_connection()
+    rows = conn.execute("SELECT * FROM agent_profiles ORDER BY agent_name").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def upsert_agent_profile(agent_name: str, commission_rate: float, admin_fee_waiver: bool, bonus_eligible: bool, default_bonus: float):
+    conn = get_connection()
+    conn.execute(
+        """INSERT INTO agent_profiles (agent_name, commission_rate, admin_fee_waiver, bonus_eligible, default_bonus)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(agent_name) DO UPDATE SET
+               commission_rate = excluded.commission_rate,
+               admin_fee_waiver = excluded.admin_fee_waiver,
+               bonus_eligible = excluded.bonus_eligible,
+               default_bonus = excluded.default_bonus""",
+        (agent_name.strip(), commission_rate, int(admin_fee_waiver), int(bonus_eligible), default_bonus),
+    )
+    conn.commit()
+    conn.close()
+
+
+def delete_agent_profile(agent_name: str):
+    conn = get_connection()
+    conn.execute("DELETE FROM agent_profiles WHERE agent_name = ?", (agent_name,))
     conn.commit()
     conn.close()
 

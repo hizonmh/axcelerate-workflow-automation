@@ -815,7 +815,7 @@ async def record_payment(
             1=Cash, 2=Credit Card (default), 4=Direct Deposit/EFT,
             5=Cheque, 6=EFTPOS, 8=Bad Debt, 9=Direct Debit, 10=Agent Deduction
         invoice_id: Apply payment to this invoice (omit for unallocated credit)
-        trans_date: Transaction date (DD/MM/YYYY, default: now)
+        trans_date: Transaction date (MM/DD/YYYY, default: now)
         reference: Reference/receipt number
         description: Transaction description
     """

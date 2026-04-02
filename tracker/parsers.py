@@ -5,7 +5,7 @@ import os
 from datetime import datetime
 import openpyxl
 import pdfplumber
-from reconciler import reconcile_transaction, PAYMENT_FROM_AGENTS
+from reconciler import reconcile_transaction, PAYMENT_FROM_AGENTS, TRANSFER_FROM_AGENTS
 
 # Bank account → instance mapping for CSV files (filename-derived account names).
 # Accounts not listed here default to "MAC".
@@ -101,6 +101,27 @@ def _resolve_duplicate_dedup_keys(records: list[dict]) -> list[dict]:
             records[i]["dedup_key"] = f"{key}|{seq}"
 
     return records
+
+
+def _extract_known_agent(text: str) -> str:
+    """Return the known agent name if found in text, else empty string.
+
+    Checks both PAYMENT_FROM_AGENTS and TRANSFER_FROM_AGENTS lists so that
+    Xero dedup keys use the clean agent name instead of the full description
+    (which may include student info that differs from the bank CSV payer column).
+    """
+    if not text:
+        return ""
+    lower = text.lower()
+    # Strip common prefixes so agent matching works on the core name
+    lower = re.sub(r"^(payment|transfer)\s+from\s+", "", lower)
+    for agent in PAYMENT_FROM_AGENTS:
+        if lower.startswith(agent):
+            return agent
+    for agent in TRANSFER_FROM_AGENTS:
+        if lower.startswith(agent):
+            return agent
+    return ""
 
 
 def _bank_account_from_filename(filename: str) -> str:
@@ -415,11 +436,11 @@ def parse_xero_excel(file_content: bytes) -> list[dict]:
             amount=amount,
         )
 
-        # For dedup, extract only the core payer name — Xero descriptions embed
-        # extra info after whitespace padding (e.g. "Edugo                      Admin fee
-        # Pinthip songngam").  Split on 2+ consecutive spaces and take the first part
-        # so the dedup key matches the clean payer field from Bank CSV.
-        dedup_payer = re.split(r"\s{2,}", description_raw)[0] if description_raw else ""
+        # For dedup, pass the raw description directly to _make_dedup_key.
+        # _normalize_payer (called inside _make_dedup_key) handles everything:
+        # collapses whitespace, strips prefixes, truncates at first digit, and
+        # takes only the first 2 words — producing the same key as Bank CSV.
+        dedup_payer = description_raw
 
         records.append({
             "date": date_str,

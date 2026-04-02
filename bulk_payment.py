@@ -122,13 +122,13 @@ for row in rows:
         print(f"SKIP row {tracker_id} | Student='{raw_id}' — not a numeric/MAC ID, marking 'Check Manually'")
         continue
 
-    # Parse date from YYYY-MM-DD (DB format) → DD/MM/YYYY for API
+    # Parse date from YYYY-MM-DD (DB format) → MM/DD/YYYY for API
     try:
         dt = datetime.strptime(raw_date, "%Y-%m-%d")
     except ValueError:
-        # Try DD/MM/YYYY as fallback
-        dt = datetime.strptime(raw_date, "%d/%m/%Y")
-    trans_date = dt.strftime("%d/%m/%Y")
+        # Try MM/DD/YYYY as fallback
+        dt = datetime.strptime(raw_date, "%m/%d/%Y")
+    trans_date = dt.strftime("%m/%d/%Y")
 
     payment_method_id = METHOD_MAP.get(payment_method.lower(), 4)
     amount = float(raw_amount)

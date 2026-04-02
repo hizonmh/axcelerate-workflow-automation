@@ -195,7 +195,7 @@ POST /accounting/transaction/
 | `amount` | numeric | Required |
 | `paymentMethodID` | numeric | Required (NOT `paymentMethod`) |
 | `invoiceID` | numeric | Optional |
-| `transDate` | DD/MM/YYYY | Optional, defaults to today (NOT `transactionDate`) |
+| `transDate` | MM/DD/YYYY | Optional, defaults to today (NOT `transactionDate`) |
 | `reference` | string | Optional |
 
 **Payment method codes:**
@@ -317,7 +317,7 @@ pay = requests.post(f"{BASE}/accounting/transaction/", headers=headers, data={
     "invoiceID":       invoice_id,
     "amount":          550.00,
     "paymentMethodID": 4,
-    "transDate":       "01/07/2025",
+    "transDate":       "07/01/2025",  # MM/DD/YYYY
     "reference":       "EFT-REF-001"
 })
 pay.raise_for_status()

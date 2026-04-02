@@ -82,7 +82,7 @@ else:
 
 **Optional:**
 - `invoiceID` — apply to a specific invoice (omit for unallocated credit)
-- `transDate` (DD/MM/YYYY) — defaults to today if omitted
+- `transDate` (MM/DD/YYYY) — defaults to today if omitted
 - `reference` — stored in the API as `REFERENCE` but **not shown in the Axcelerate UI**
 - `description` — displayed in the **UI "Reference" column**; always send the same value as `reference` so it appears in the UI
 - `notes` — internal notes
@@ -111,7 +111,7 @@ else:
 ```
 > NOTE: `DESCRIPTION` is what the Axcelerate UI displays in the "Reference" column — always send it alongside `reference`.
 ```
-> NOTE: `TRANSDATE` is returned as `YYYY-MM-DD` in the response even though you send `transDate` as `DD/MM/YYYY`.
+> NOTE: `TRANSDATE` is returned as `YYYY-MM-DD` in the response even though you send `transDate` as `MM/DD/YYYY`.
 > NOTE: `AMOUNT` is returned as a string, not a number — use `float(tx["AMOUNT"])` when doing arithmetic.
 
 ---
@@ -270,7 +270,7 @@ pay = requests.post(f"{BASE}/accounting/transaction/", headers=headers, data={
     "invoiceID":       invoice_id,
     "amount":          float(oldest["BALANCE"]),
     "paymentMethodID": 4,            # Direct Deposit
-    "transDate":       "01/07/2025", # DD/MM/YYYY
+    "transDate":       "07/01/2025", # MM/DD/YYYY
     "reference":       "EFT-REF-001",
     "description":     "EFT-REF-001",  # UI "Reference" column — must match reference
 })
@@ -288,7 +288,7 @@ pay = requests.post(f"{BASE}/accounting/transaction/", headers=headers, data={
     "contactID":       <CONTACT_ID>,
     "amount":          550.00,
     "paymentMethodID": 4,            # Direct Deposit
-    "transDate":       "01/07/2025",
+    "transDate":       "07/01/2025",  # MM/DD/YYYY
     "reference":       "EFT-REF-001",
     "description":     "EFT-REF-001",  # UI "Reference" column — must match reference
     # No invoiceID — recorded as unallocated credit
@@ -328,7 +328,7 @@ The tracker app's "Upload to Axcelerate" section has per-instance buttons that i
 | Tracker Column | API Field | Notes |
 |----------------|-----------|-------|
 | `student` | `contactID` | Numeric ID or MAC ID (auto-resolved) |
-| `date` | `transDate` | Converted from YYYY-MM-DD to DD/MM/YYYY |
+| `date` | `transDate` | Converted from YYYY-MM-DD to MM/DD/YYYY |
 | `amount` | `amount` | Stripped of $ and commas |
 | `payment_method` | `paymentMethodID` | Mapped via METHOD_MAP dict |
 | `bank_account` | `reference` + `description` | Set as both so it appears in UI |
@@ -453,7 +453,7 @@ print(f"Credit note issued: {cn.json()['CREDITNOTEID']}")
 - [ ] Is the invoice approved (not in DRAFT)? Check `INVOICENR != "AUTO"` before applying payment.
 - [ ] Is the invoice balance > 0? (Filter out already-paid invoices.)
 - [ ] Is `paymentMethodID` correct (1=Cash, 2=CC, 4=EFT/Direct Deposit, 5=Cheque, 6=EFTPOS)?
-- [ ] Is `transDate` in DD/MM/YYYY format?
+- [ ] Is `transDate` in MM/DD/YYYY format?
 - [ ] Are all POST calls using `data=` (form encoding), not `json=`?
 
 ---
