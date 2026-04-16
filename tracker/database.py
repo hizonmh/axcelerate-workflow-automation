@@ -56,6 +56,16 @@ def init_db():
         conn.execute("SELECT location FROM transactions LIMIT 1")
     except Exception:
         conn.execute("ALTER TABLE transactions ADD COLUMN location TEXT NOT NULL DEFAULT ''")
+    # Migration: add upload_amount column if missing (for agent deduction full amount)
+    try:
+        conn.execute("SELECT upload_amount FROM transactions LIMIT 1")
+    except Exception:
+        conn.execute("ALTER TABLE transactions ADD COLUMN upload_amount REAL")
+    # Migration: add upload_description column if missing (for agent deduction description)
+    try:
+        conn.execute("SELECT upload_description FROM transactions LIMIT 1")
+    except Exception:
+        conn.execute("ALTER TABLE transactions ADD COLUMN upload_description TEXT")
     # Agent profiles table
     conn.execute("""
         CREATE TABLE IF NOT EXISTS agent_profiles (

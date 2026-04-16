@@ -75,7 +75,7 @@ print(f"Loading 'OK to Upload' transactions from: {DB_PATH}\n")
 conn = sqlite3.connect(DB_PATH)
 conn.row_factory = sqlite3.Row
 rows_raw = conn.execute(
-    "SELECT id, student, date, amount, payment_method, bank_account FROM transactions "
+    "SELECT id, student, date, amount, payment_method, bank_account, upload_amount, upload_description FROM transactions "
     "WHERE status = 'OK to Upload' AND instance = ? ORDER BY date",
     (instance,),
 ).fetchall()
@@ -133,7 +133,17 @@ for row in rows:
     payment_method_id = METHOD_MAP.get(payment_method.lower(), 4)
     amount = float(raw_amount)
 
-    print(f"Processing row {tracker_id} | {raw_id} | ${amount:.2f} | {payment_method} | {reference} | {trans_date}")
+    # Agent Deduction: use upload_amount (full invoice amount) if set
+    upload_amount = row.get("upload_amount")
+    upload_desc = row.get("upload_description")
+    if upload_amount and payment_method.lower() == "agent deduction":
+        api_amount = float(upload_amount)
+        description = upload_desc or reference
+        print(f"Processing row {tracker_id} | {raw_id} | ${amount:.2f} (upload: ${api_amount:.2f}) | {payment_method} | {reference} | {trans_date}")
+    else:
+        api_amount = amount
+        description = reference
+        print(f"Processing row {tracker_id} | {raw_id} | ${amount:.2f} | {payment_method} | {reference} | {trans_date}")
 
     try:
         # Resolve contact_id: numeric = use directly; MAC ID = look up by optionalID
@@ -152,7 +162,7 @@ for row in rows:
             contact_id = int(results[0]["CONTACTID"])
             print(f"  Resolved {raw_id} -> CONTACTID={contact_id}")
 
-        # Check for a matching invoice (balance == payment amount)
+        # Check for a matching invoice (balance == api_amount)
         invoice_id = None
         for status in ["SENT", "PARTIAL", "OVERDUE"]:
             inv_r = requests.get(
@@ -164,7 +174,7 @@ for row in rows:
             inv_results = inv_r.json()
             if isinstance(inv_results, list):
                 for inv in inv_results:
-                    if abs(float(inv.get("BALANCE", 0)) - amount) < 0.01:
+                    if abs(float(inv.get("BALANCE", 0)) - api_amount) < 0.01:
                         invoice_id = inv["INVOICEID"]
                         break
             if invoice_id:
@@ -173,15 +183,15 @@ for row in rows:
         # Record payment — allocated if matching invoice found, otherwise unallocated
         post_data = {
             "contactID":       contact_id,
-            "amount":          amount,
+            "amount":          api_amount,
             "paymentMethodID": payment_method_id,
             "transDate":       trans_date,
             "reference":       reference,
-            "description":     reference,
+            "description":     description,
         }
         if invoice_id:
             post_data["invoiceID"] = invoice_id
-            print(f"  Matched invoice {invoice_id} (balance=${amount:.2f})")
+            print(f"  Matched invoice {invoice_id} (balance=${api_amount:.2f})")
         else:
             print(f"  No matching invoice — recording as unallocated credit")
 
@@ -283,24 +293,30 @@ for s, count in sorted(status_summary.items()):
 
 print("=" * 130)
 
-# ── CSV REPORT ──────────────────────────────────────────────────────
+# ── CSV REPORT (append to persistent per-instance file) ─────────────
+report_label = "NECTECH" if instance == "NEC" else instance
 report_path = os.path.join(
     os.path.dirname(__file__),
-    f"payment_report_{instance}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+    f"payment_report_{report_label}.csv",
 )
 
 report_fields = [
-    "tracker_row_id", "contact_id_input", "contact_id",
+    "uploaded_at", "tracker_row_id", "contact_id_input", "contact_id",
     "amount", "payment_method", "transaction_id", "date", "reference",
     "invoice_id", "status", "tracker_status", "error",
 ]
 
-with open(report_path, "w", newline="", encoding="utf-8") as f:
+write_header = not os.path.exists(report_path)
+uploaded_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+with open(report_path, "a", newline="", encoding="utf-8") as f:
     writer = csv.DictWriter(f, fieldnames=report_fields)
-    writer.writeheader()
+    if write_header:
+        writer.writeheader()
 
     for tx in transactions:
         writer.writerow({
+            "uploaded_at":      uploaded_at,
             "tracker_row_id":   tx["tracker_id"],
             "contact_id_input": tx["id"],
             "contact_id":       tx["contact_id"],
@@ -317,6 +333,7 @@ with open(report_path, "w", newline="", encoding="utf-8") as f:
 
     for sr in skipped_rows:
         writer.writerow({
+            "uploaded_at":      uploaded_at,
             "tracker_row_id":   sr["id"],
             "contact_id_input": sr["student"],
             "contact_id":       "",
@@ -333,6 +350,7 @@ with open(report_path, "w", newline="", encoding="utf-8") as f:
 
     for fr in failed_rows:
         writer.writerow({
+            "uploaded_at":      uploaded_at,
             "tracker_row_id":   fr["tracker_id"],
             "contact_id_input": fr["id"],
             "contact_id":       "",
@@ -347,4 +365,4 @@ with open(report_path, "w", newline="", encoding="utf-8") as f:
             "error":            fr["error"],
         })
 
-print(f"\nCSV report saved to: {report_path}")
+print(f"\nCSV report appended to: {report_path}")

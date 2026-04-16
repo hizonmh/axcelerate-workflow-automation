@@ -88,3 +88,32 @@ def verify_payment(
     result["actual_payment"] = actual_payment
     result["discrepancy"] = round(actual_payment - result["expected_payment"], 2)
     return result
+
+
+def verify_payment_all_rates(
+    actual_payment: float,
+    tuition_fee: float,
+    admin_fee: float = 0.0,
+    material_fee: float = 0.0,
+    admin_fee_waiver: bool = False,
+    bonus: float = 0.0,
+    rates: list = None,
+) -> list[dict]:
+    """Verify an agent payment against all commission rates.
+
+    Returns a list of verification results, one per rate.
+    """
+    if rates is None:
+        rates = [0.30, 0.35, 0.40]
+    return [
+        verify_payment(
+            actual_payment=actual_payment,
+            tuition_fee=tuition_fee,
+            admin_fee=admin_fee,
+            material_fee=material_fee,
+            commission_rate=rate,
+            admin_fee_waiver=admin_fee_waiver,
+            bonus=bonus,
+        )
+        for rate in rates
+    ]

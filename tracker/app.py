@@ -3,9 +3,9 @@ import pandas as pd
 import subprocess
 import sys
 import os
-from database import init_db, upsert_transactions, get_all_transactions, bulk_update_status, get_agent_profiles, upsert_agent_profile, delete_agent_profile
+from database import init_db, upsert_transactions, get_all_transactions, bulk_update_status
 from parsers import detect_and_parse
-from agent_calculator import verify_payment
+from agent_calculator import verify_payment_all_rates
 
 # --- Page config ---
 st.set_page_config(page_title="Bank Transaction Tracker", layout="wide")
@@ -140,13 +140,16 @@ with st.expander("Upload to Axcelerate"):
         _upload_panel("MAC-EZIDEBIT", "EZIDEBIT")
 
 # --- Agent Commission Calculator ---
-_calc_expanded = st.session_state.pop("calc_expanded", False)
+_calc_expanded = st.session_state.get("calc_expanded", False)
+def _keep_calc_open():
+    st.session_state["calc_expanded"] = True
 # Apply prefill from transaction table (must happen before widgets render)
 _prefill = st.session_state.pop("_calc_prefill", None)
 if _prefill:
     st.session_state["calc_actual"] = _prefill["amount"]
-    st.session_state["calc_agent"] = _prefill["agent"]
     st.session_state["calc_txn_info"] = _prefill["txn_info"]
+    if "txn_id" in _prefill:
+        st.session_state["_calc_prefill_txn_id"] = _prefill["txn_id"]
 with st.expander("Agent Commission Calculator", expanded=_calc_expanded):
     # Show prefilled transaction info if present
     _txn_info = st.session_state.get("calc_txn_info")
@@ -156,137 +159,97 @@ with st.expander("Agent Commission Calculator", expanded=_calc_expanded):
             st.info(f"Loaded from transaction: **{_txn_info['payer']}** — {_txn_info['date']} — Student: {_txn_info['student']} — ${_txn_info['amount']:,.2f}")
         with col_clear:
             if st.button("Clear", key="calc_clear_prefill"):
-                for k in ["calc_txn_info", "calc_actual", "calc_agent"]:
+                for k in ["calc_txn_info", "calc_actual"]:
                     st.session_state.pop(k, None)
                 st.rerun()
 
-    calc_tab_verify, calc_tab_profiles = st.tabs(["Verify Payment", "Agent Profiles"])
+    col_c1, col_c2 = st.columns([1, 2])
 
-    # --- Agent Profiles tab ---
-    with calc_tab_profiles:
-        profiles = get_agent_profiles()
-        profile_map = {p["agent_name"]: p for p in profiles}
-
-        st.caption("Save agent commission arrangements so you don't have to re-enter them each time.")
-        col_p1, col_p2, col_p3, col_p4, col_p5, col_p6 = st.columns([2, 1, 1, 1, 1, 1])
-        with col_p1:
-            new_agent_name = st.text_input("Agent Name", key="prof_name")
-        with col_p2:
-            new_agent_rate = st.selectbox("Commission", [30, 35, 40], key="prof_rate", format_func=lambda x: f"{x}%")
-        with col_p3:
-            new_agent_waiver = st.checkbox("AF Waiver", key="prof_waiver")
-        with col_p4:
-            new_agent_bonus_elig = st.checkbox("Bonus Eligible", key="prof_bonus_elig")
-        with col_p5:
-            new_agent_bonus = st.number_input("Default Bonus $", min_value=0.0, step=100.0, key="prof_bonus")
-        with col_p6:
-            st.markdown("<br>", unsafe_allow_html=True)
-            if st.button("Save", type="primary", key="prof_save"):
-                if new_agent_name.strip():
-                    upsert_agent_profile(
-                        new_agent_name.strip(),
-                        new_agent_rate / 100,
-                        new_agent_waiver,
-                        new_agent_bonus_elig,
-                        new_agent_bonus,
-                    )
-                    st.toast(f"Saved profile for {new_agent_name.strip()}")
-                    st.rerun()
-
-        if profiles:
-            prof_df = pd.DataFrame(profiles)
-            prof_df["commission_rate"] = prof_df["commission_rate"].apply(lambda x: f"{x*100:.0f}%")
-            prof_df["admin_fee_waiver"] = prof_df["admin_fee_waiver"].apply(lambda x: "Yes" if x else "No")
-            prof_df["bonus_eligible"] = prof_df["bonus_eligible"].apply(lambda x: "Yes" if x else "No")
-            prof_df["default_bonus"] = prof_df["default_bonus"].apply(lambda x: f"${x:,.2f}" if x else "-")
-            display_prof = prof_df[["agent_name", "commission_rate", "admin_fee_waiver", "bonus_eligible", "default_bonus"]]
-            display_prof.columns = ["Agent", "Commission", "AF Waiver", "Bonus Eligible", "Default Bonus"]
-            st.dataframe(display_prof, use_container_width=True, hide_index=True)
-
-            del_agent = st.selectbox("Delete profile", [""] + [p["agent_name"] for p in profiles], key="prof_del")
-            if del_agent and st.button("Delete", key="prof_del_btn"):
-                delete_agent_profile(del_agent)
-                st.toast(f"Deleted profile for {del_agent}")
-                st.rerun()
-
-    # --- Verify Payment tab ---
-    with calc_tab_verify:
-        profiles = get_agent_profiles()
-        profile_map = {p["agent_name"]: p for p in profiles}
-        agent_options = ["(manual entry)"] + sorted(profile_map.keys())
-
-        col_c1, col_c2 = st.columns([1, 2])
-
-        with col_c1:
-            selected_agent = st.selectbox("Agent", agent_options, key="calc_agent")
-            actual_payment = st.number_input("Payment Received $", min_value=0.0, step=0.01, format="%.2f", key="calc_actual")
-
-            if selected_agent != "(manual entry)" and selected_agent in profile_map:
-                prof = profile_map[selected_agent]
-                rate_options = [30, 35, 40]
-                rate_val = int(prof["commission_rate"] * 100)
-                rate_idx = rate_options.index(rate_val) if rate_val in rate_options else 0
-                comm_rate = st.selectbox("Commission Rate", rate_options, index=rate_idx, key="calc_rate", format_func=lambda x: f"{x}%")
-                af_waiver = st.checkbox("Admin Fee Waiver", value=bool(prof["admin_fee_waiver"]), key="calc_waiver")
-                bonus = st.number_input("Bonus $", min_value=0.0, value=prof["default_bonus"], step=100.0, key="calc_bonus")
-            else:
-                comm_rate = st.selectbox("Commission Rate", [30, 35, 40], key="calc_rate", format_func=lambda x: f"{x}%")
-                af_waiver = st.checkbox("Admin Fee Waiver", key="calc_waiver")
-                bonus = st.number_input("Bonus $", min_value=0.0, step=100.0, key="calc_bonus")
+    with col_c1:
+        actual_payment = st.number_input("Payment Received $", min_value=0.0, step=0.01, format="%.2f", key="calc_actual", on_change=_keep_calc_open)
+        af_waiver = st.checkbox("Admin Fee Waiver", key="calc_waiver", on_change=_keep_calc_open)
+        bonus = st.number_input("Bonus $", min_value=0.0, step=100.0, key="calc_bonus", on_change=_keep_calc_open)
 
         with col_c2:
             st.caption("Invoice Line Items")
             col_f1, col_f2, col_f3 = st.columns(3)
             with col_f1:
-                tuition = st.number_input("Tuition Fee $", min_value=0.0, step=0.01, format="%.2f", key="calc_tuition")
+                tuition = st.number_input("Tuition Fee $", min_value=0.0, step=0.01, format="%.2f", key="calc_tuition", on_change=_keep_calc_open)
             with col_f2:
-                admin = st.number_input("Admin Fee $", min_value=0.0, step=0.01, format="%.2f", key="calc_admin")
+                admin = st.number_input("Admin Fee $", min_value=0.0, step=0.01, format="%.2f", key="calc_admin", on_change=_keep_calc_open)
             with col_f3:
-                material = st.number_input("Material Fee $", min_value=0.0, step=0.01, format="%.2f", key="calc_material")
+                material = st.number_input("Material Fee $", min_value=0.0, step=0.01, format="%.2f", key="calc_material", on_change=_keep_calc_open)
 
             if tuition > 0 or actual_payment > 0:
-                result = verify_payment(
+                results = verify_payment_all_rates(
                     actual_payment=actual_payment,
                     tuition_fee=tuition,
                     admin_fee=admin,
                     material_fee=material,
-                    commission_rate=comm_rate / 100,
                     admin_fee_waiver=af_waiver,
                     bonus=bonus,
                 )
 
                 st.divider()
 
-                # Breakdown
-                col_r1, col_r2, col_r3 = st.columns(3)
-                with col_r1:
-                    st.markdown("**Invoice**")
-                    st.markdown(f"Tuition: **${result['tuition_fee']:,.2f}**")
-                    st.markdown(f"Admin: **${result['admin_fee']:,.2f}**")
-                    st.markdown(f"Material: **${result['material_fee']:,.2f}**")
-                    st.markdown(f"**Total: ${result['invoice_total']:,.2f}**")
-                with col_r2:
-                    st.markdown("**Agent Deductions**")
-                    st.markdown(f"Commission ({comm_rate}%): ${result['commission']:,.2f}")
-                    st.markdown(f"GST (10%): ${result['gst_on_commission']:,.2f}")
-                    st.markdown(f"Commission + GST: **${result['total_commission']:,.2f}**")
-                    if af_waiver:
-                        st.markdown(f"AF Waiver: ${result['admin_fee_waiver']:,.2f}")
-                    if bonus > 0:
-                        st.markdown(f"Bonus: ${result['bonus']:,.2f}")
-                    st.markdown(f"**Total Deduction: ${result['total_deduction']:,.2f}**")
-                with col_r3:
-                    st.markdown("**Verification**")
-                    st.markdown(f"Expected Payment: **${result['expected_payment']:,.2f}**")
-                    st.markdown(f"Actual Payment: **${result['actual_payment']:,.2f}**")
+                # Invoice summary (shared across all rates)
+                invoice_total = results[0]["invoice_total"]
+                st.markdown(
+                    f"**Invoice Total: ${invoice_total:,.2f}** &nbsp; "
+                    f"(Tuition: ${tuition:,.2f} &nbsp;|&nbsp; Admin: ${admin:,.2f} &nbsp;|&nbsp; Material: ${material:,.2f})"
+                )
 
+                st.markdown("")
+
+                # Show all 3 rates side by side
+                rate_cols = st.columns(3)
+                for col, result in zip(rate_cols, results):
+                    rate_pct = int(result["commission_rate"] * 100)
                     disc = result["discrepancy"]
-                    if disc == 0:
-                        st.success("Payment is correct")
-                    elif disc > 0:
-                        st.warning(f"Overpaid by ${disc:,.2f}")
-                    else:
-                        st.error(f"Underpaid by ${abs(disc):,.2f}")
+                    with col:
+                        st.markdown(f"### {rate_pct}% Commission")
+                        st.markdown(f"Commission: ${result['commission']:,.2f}")
+                        st.markdown(f"GST (10%): ${result['gst_on_commission']:,.2f}")
+                        st.markdown(f"Commission + GST: **${result['total_commission']:,.2f}**")
+                        if af_waiver:
+                            st.markdown(f"AF Waiver: ${result['admin_fee_waiver']:,.2f}")
+                        if bonus > 0:
+                            st.markdown(f"Bonus: ${result['bonus']:,.2f}")
+                        st.markdown(f"**Total Deduction: ${result['total_deduction']:,.2f}**")
+                        st.divider()
+                        st.markdown(f"Expected: **${result['expected_payment']:,.2f}**")
+                        st.markdown(f"Received: **${result['actual_payment']:,.2f}**")
+                        if disc == 0:
+                            st.success("Exact match")
+                        elif disc > 0:
+                            st.warning(f"Overpaid by ${disc:,.2f}")
+                        else:
+                            st.error(f"Underpaid by ${abs(disc):,.2f}")
+
+                        # "Prepare for Upload" button — only when prefilled from a transaction
+                        if _txn_info and disc == 0:
+                            if st.button(f"Prepare for Upload ({rate_pct}%)", type="primary", key=f"prep_upload_{rate_pct}", use_container_width=True):
+                                _prep_txn_id = st.session_state.get("_calc_prefill_txn_id")
+                                if _prep_txn_id:
+                                    from database import get_connection
+                                    from datetime import datetime
+                                    _conn = get_connection()
+                                    _conn.execute(
+                                        "UPDATE transactions SET upload_amount = ?, upload_description = ?, status = 'OK to Upload', updated_at = ? WHERE id = ?",
+                                        (
+                                            result["invoice_total"],
+                                            f"Agent deducted {result['total_deduction']:,.2f} - paid {result['actual_payment']:,.2f}",
+                                            datetime.now().isoformat(),
+                                            _prep_txn_id,
+                                        ),
+                                    )
+                                    _conn.commit()
+                                    _conn.close()
+                                    st.toast(f"Transaction prepared: upload amount ${result['invoice_total']:,.2f}")
+                                    for k in ["calc_txn_info", "calc_actual", "_calc_prefill_txn_id", "calc_expanded"]:
+                                        st.session_state.pop(k, None)
+                                    st.session_state.table_key += 1
+                                    st.rerun()
 
 
 # Load data
@@ -401,10 +364,21 @@ def render_transaction_table(tab_df: pd.DataFrame, tab_key: str):
         else:
             filtered["_edited"] = ""
 
-        display_cols = ["_edited", "status", "source", "bank_account", "student", "date", "amount", "payment_method", "payer_name", "reference", "description"]
+        # Build "Upload As" column: shows upload amount + description for agent deductions
+        if "upload_amount" in filtered.columns:
+            filtered["_upload_as"] = filtered.apply(
+                lambda r: f"${r['upload_amount']:,.2f} — {r['upload_description']}"
+                if pd.notna(r.get("upload_amount")) and r.get("upload_amount")
+                else "",
+                axis=1,
+            )
+        else:
+            filtered["_upload_as"] = ""
+
+        display_cols = ["_edited", "status", "source", "bank_account", "student", "date", "amount", "_upload_as", "payment_method", "payer_name", "reference", "description"]
 
         view_df = filtered[display_cols].reset_index(drop=True)
-        view_df.columns = ["⟳", "Status", "Source", "Account", "Student", "Date", "Amount", "Payment Method", "Payer", "Reference", "Description"]
+        view_df.columns = ["⟳", "Status", "Source", "Account", "Student", "Date", "Amount", "Upload As", "Payment Method", "Payer", "Reference", "Description"]
 
         def highlight_row(row):
             if row["Status"] == "Axcelerate Updated":
@@ -495,18 +469,9 @@ def render_transaction_table(tab_df: pd.DataFrame, tab_key: str):
                 if _is_single_agent:
                     if st.button("📐 Calculator", use_container_width=True, key=f"send_calc_{tab_key}"):
                         row = selected_filtered.iloc[0]
-                        # Try to match payer to a saved agent profile
-                        _profiles = get_agent_profiles()
-                        _matched_agent = "(manual entry)"
-                        payer_lower = (row["payer_name"] or "").lower()
-                        for p in _profiles:
-                            if p["agent_name"].lower() in payer_lower or payer_lower in p["agent_name"].lower():
-                                _matched_agent = p["agent_name"]
-                                break
-                        # Store in intermediate key (applied before widgets on next rerun)
                         st.session_state["_calc_prefill"] = {
                             "amount": float(row["amount"]),
-                            "agent": _matched_agent,
+                            "txn_id": int(row["id"]),
                             "txn_info": {
                                 "payer": row["payer_name"],
                                 "student": row["student"],

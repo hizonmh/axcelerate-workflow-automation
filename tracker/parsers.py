@@ -52,8 +52,9 @@ def _extract_payer_from_description(description: str) -> str:
     # Remove "PAYMENT FROM" / "TRANSFER FROM" prefix to get the name
     text = re.sub(r"^PAYMENT\s+FROM\s+", "", text, flags=re.IGNORECASE)
     text = re.sub(r"^TRANSFER\s+FROM\s+", "", text, flags=re.IGNORECASE)
-    # Strip extra info after whitespace padding (2+ spaces) to match Xero dedup
-    text = re.split(r"\s{2,}", text)[0]
+    # Return the full remaining text — _normalize_payer() handles whitespace
+    # collapsing, digit truncation, and word limiting consistently for both
+    # Bank CSV and Xero paths.
     return text
 
 
@@ -472,123 +473,76 @@ def _extract_ezidebit_location(pdf_text: str) -> str:
 def parse_ezidebit_pdf(file_content: bytes) -> list[dict]:
     """Parse Ezidebit Processed Payments Report PDF.
 
-    Extracts only rows with Result = 'Paid'. Fields mapped:
-      Settlement Date → date (YYYY-MM-DD)
-      Client Contract Ref → student (contactID or optionalID)
-      Payment Amt → amount
-      bank_account = 'EZIDEBIT'
-      payment_method = 'Direct Debit'
-      instance = 'EZIDEBIT'
-      status = 'OK to Upload'
+    Uses line-based regex over the extracted text because pdfplumber's table
+    extraction is fragile across Ezidebit's layout variants (columns merge or
+    split depending on how many data rows there are). A settled Paid row
+    always has the structure:
+
+      TRANS_DATE SETTLEMENT_DATE PAYER_ID PAYER_NAME... CLIENT_REF Paid $AMT $FEES $CLEARED
+
+    Pending Paid rows (no settlement date yet) and Failed rows are skipped.
     """
     records = []
 
-    table_settings = {
-        "vertical_strategy": "text",
-        "horizontal_strategy": "text",
-    }
+    # DD/MM/YYYY   DD/MM/YYYY   NNN-NNN-NNN   <anything>   Paid   $amt   $fees   $cleared
+    line_re = re.compile(
+        r"(?P<trans>\d{2}/\d{2}/\d{4})\s+"
+        r"(?P<settle>\d{2}/\d{2}/\d{4})\s+"
+        r"(?P<payer_id>\d{3}-\d{3}-\d{3})\s+"
+        r"(?P<middle>.+?)\s+"
+        r"Paid\s+"
+        r"\$(?P<amount>[0-9,]+\.\d{2})\s+"
+        r"\$[0-9,]+\.\d{2}\s+"
+        r"\$[0-9,]+\.\d{2}"
+    )
+    id_re = re.compile(r"(MAC\s?\d+|\b\d{7,8}\b)", re.IGNORECASE)
 
     with pdfplumber.open(io.BytesIO(file_content)) as pdf:
-        # Extract location from first page text (e.g. "Macallan College - Brisbane")
         location = _extract_ezidebit_location(pdf.pages[0].extract_text() or "") if pdf.pages else ""
 
         for page in pdf.pages:
-            tables = page.extract_tables(table_settings)
-            if not tables:
-                continue
-
-            for table in tables:
-                # Find header row to locate column indices
-                header_idx = None
-                col_map = {}
-                for i, row in enumerate(table):
-                    cells = [str(c).strip().lower() if c else "" for c in row]
-                    joined = " ".join(cells)
-                    if "trans" in joined and "result" in joined and "settlement" in joined:
-                        header_idx = i
-                        for j, cell in enumerate(cells):
-                            if "settlement" in cell:
-                                col_map["settlement_date"] = j
-                            elif "trans" in cell and "date" in cell:
-                                col_map["trans_date"] = j
-                            elif "client contract" in cell:
-                                col_map["client_contract_ref"] = j
-                            elif cell == "result":
-                                col_map["result"] = j
-                            elif "ment amt" in cell or "payment amt" in cell:
-                                # Handles split "Pay" / "ment Amt" across columns
-                                col_map["payment_amt"] = j
-                            elif "payer name" in cell:
-                                col_map["payer_name"] = j
-                        break
-
-                if header_idx is None or "result" not in col_map:
+            text = page.extract_text() or ""
+            for line in text.splitlines():
+                m = line_re.search(line)
+                if not m:
                     continue
 
-                # Process data rows after header
-                for row in table[header_idx + 1:]:
-                    if not row:
-                        continue
+                try:
+                    date_obj = datetime.strptime(m.group("settle"), "%d/%m/%Y")
+                    date_str = date_obj.strftime("%Y-%m-%d")
+                except ValueError:
+                    continue
 
-                    # Skip empty/spacer rows
-                    result_idx = col_map["result"]
-                    if result_idx >= len(row):
-                        continue
-                    result = str(row[result_idx] or "").strip()
-                    if result != "Paid":
-                        continue
+                try:
+                    amount = float(m.group("amount").replace(",", ""))
+                except ValueError:
+                    continue
 
-                    # Settlement date (DD/MM/YYYY → YYYY-MM-DD)
-                    # Rows with "Paid" but no settlement date are still pending
-                    # and may fail — skip them.
-                    sd_idx = col_map.get("settlement_date", 1)
-                    sd_val = row[sd_idx] if sd_idx < len(row) else None
-                    settlement_raw = str(sd_val).strip() if sd_val else ""
-                    if not settlement_raw:
-                        continue
-                    try:
-                        date_obj = datetime.strptime(settlement_raw, "%d/%m/%Y")
-                        date_str = date_obj.strftime("%Y-%m-%d")
-                    except ValueError:
-                        continue
+                middle = m.group("middle").strip()
+                id_match = id_re.search(middle)
+                if not id_match:
+                    continue
+                student = id_match.group(1).replace(" ", "").upper()
+                # Payer name is everything in "middle" before the student ID,
+                # minus trailing commas and whitespace.
+                payer = middle[:id_match.start()].strip().rstrip(",").strip()
 
-                    # Client Contract Ref → student
-                    ccr_idx = col_map.get("client_contract_ref", 4)
-                    student = str(row[ccr_idx] if ccr_idx < len(row) else "" or "").strip()
-                    if not student:
-                        continue
-
-                    # Payment Amt (strip $ and commas)
-                    pa_idx = col_map.get("payment_amt", 7)
-                    amt_raw = str(row[pa_idx] if pa_idx < len(row) else "" or "").strip()
-                    amt_raw = amt_raw.replace("$", "").replace(",", "")
-                    try:
-                        amount = float(amt_raw)
-                    except ValueError:
-                        continue
-
-                    # Payer name (optional, for reference)
-                    pn_idx = col_map.get("payer_name", 3)
-                    payer = str(row[pn_idx] if pn_idx < len(row) else "" or "").strip()
-
-                    dedup_key = f"ezidebit|{date_str}|{amount}|{student}"
-
-                    records.append({
-                        "date": date_str,
-                        "amount": amount,
-                        "description": f"Ezidebit Direct Debit - {payer}" if payer else "Ezidebit Direct Debit",
-                        "payer_name": payer,
-                        "reference": student,
-                        "payment_note": "",
-                        "source": "Ezidebit",
-                        "bank_account": "EZIDEBIT",
-                        "instance": "EZIDEBIT",
-                        "location": location,
-                        "student": student,
-                        "payment_method": "Direct Debit",
-                        "status": "OK to Upload",
-                        "dedup_key": dedup_key,
-                    })
+                records.append({
+                    "date": date_str,
+                    "amount": amount,
+                    "description": f"Ezidebit Direct Debit - {payer}" if payer else "Ezidebit Direct Debit",
+                    "payer_name": payer,
+                    "reference": student,
+                    "payment_note": "",
+                    "source": "Ezidebit",
+                    "bank_account": "EZIDEBIT",
+                    "instance": "EZIDEBIT",
+                    "location": location,
+                    "student": student,
+                    "payment_method": "Direct Debit",
+                    "status": "OK to Upload",
+                    "dedup_key": f"ezidebit|{date_str}|{amount}|{student}",
+                })
 
     return _resolve_duplicate_dedup_keys(records)
 
