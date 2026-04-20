@@ -31,24 +31,85 @@ PAYMENT_FROM_AGENTS: dict[str, str] = {
     "ankit arora": "i",
     "angela sthefania carrasco": "i",
     "justice fami": "h",
-    "kiran": "i",
+    "kiran ad": "i",
     "acelegalpartners": "i",
     "royal international migrat": "hi",
     "fast track consultancy": "hi",
     "bajwa consultant": "d",
+    # Individual agents confirmed from historical Axcelerate Updated data
+    "jagjeet sembhi": "hi",
+    "nitish gupta": "hi",
+    "joginder pal singh": "hi",
+    "narayan pandey": "hi",
+    "kunal taneja": "hi",
+    "rakshit sawhney": "hi",
+    "muhammad nawaz": "hi",
+    "asif chaudhary": "hi",
+    "nishan singh": "hi",
+    "sandeep kaur": "hi",
+    "sandeep kour": "hi",
+    "gauravdeep madan": "hi",
+    "kamolrat boonyakulsrirung": "hi",
+    "praphon sintuchai": "hi",
+    "tserenchimed khishigjargal": "hi",
+    "thi hong nhung nguyen": "hi",
+    "renu gautam dharel": "hi",
+    "palak gupta": "hi",
+    "map education": "hi",
+    "edugo": "hi",
+    "ehtisham batth": "hi",
+    "karol go sy": "hi",
+    "caroline daniels": "hi",
+    "frank chikowore": "hi",
+    "sukhdeep khosa": "hi",
+    "richa pradhan": "hi",
+    "ambuja ghimire": "hi",
+    "bidur kumar khatri": "hi",
+    "fabio boldrini": "hi",
+    "geoffrey cook": "hi",
+    "bibi sana ali": "hi",
+    "bharat nandha": "hi",
+    "jesmin joha": "hi",
+    "harsh yadav": "hi",
+    "roshan mahat": "hi",
+    "trang thi hong tran": "hi",
+    "andrea michelotti": "hi",
+    "xiao xiao": "hi",
+    "linas austra": "hi",
+    "yiran xu": "hi",
+    "min liu": "hi",
+    "lungten wangmo": "hi",
+    "shivani": "hi",
+    "juan pinzon piraquive": "hi",
+    "harold bonilla lopez": "hi",
+    "armaanjit kalia": "hi",
+    "paula kanashiro": "hi",
+    "jaskaran singh": "hi",
+    "kamoltrat": "hi",
+    "rohit gahlawat": "hi",
+    "paramjit kaur": "hi",
+    "study in austral": "hi",
+    "study central": "hi",
+    "gautam kapil": "hi",
+    "i edu net": "hi",
 }
 
 # TRANSFER FROM agents — student info is extracted from Col D (description)
+# NOTE: "cba" removed — it's the Commonwealth Bank routing label on some transfers, not an agent
 TRANSFER_FROM_AGENTS: list[str] = [
     "aussizz",
     "shabbir iqbal",
-    "cba",
     "g8m8",
     "great mate",
     "asia pacific edu",
     "foad matrix",
     "bajwa consultant",
     "marco aurelio",
+    "astute biz",
+    "edutravel group",
+    "first one educat",
+    "grow study",
+    "west 1 melbourne",
 ]
 
 # Organization keywords that indicate Agent Deduction
@@ -321,19 +382,10 @@ def classify_payment_method(
     if payee and not _is_own_entity(payee):
         return "Agent Deduction"
 
-    # Payer paying for a different student (payer ≠ student in references)
-    if payer and payer != "#NAME?":
-        payer_words = set(payer.upper().split()[:3])
-        for ref_col in [col_h, col_i]:
-            if ref_col:
-                ref_clean = _clean_student_name(ref_col)
-                if ref_clean and len(ref_clean.split()) >= 2:
-                    ref_words = set(ref_clean.upper().split()[:3])
-                    # If no overlap in name words → different person paying
-                    if payer_words and ref_words and not payer_words.intersection(ref_words):
-                        return "Agent Deduction"
-
     # 5. Default: Direct Deposit
+    # Note: we intentionally do NOT flag "payer name ≠ student name in refs" as Agent Deduction —
+    # family members often pay for students directly. Agent Deduction requires a known agent,
+    # a TRANSFER FROM agent match, or org keywords in the payer name.
     return "Direct Deposit"
 
 
