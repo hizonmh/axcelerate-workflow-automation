@@ -8,7 +8,7 @@ This is a **Claude AI command library, MCP server, and automation toolkit** for 
 
 - **Claude Code skills** (prompt commands) for each API domain
 - A **Model Context Protocol (MCP) server** exposing Axcelerate API as tools for any MCP-compatible client
-- A **Bank Transaction Tracker** (Streamlit web app) for importing, reconciling, and managing bank transactions across all three instances
+- A **Bank Transaction Tracker** (Streamlit web app, with an optional FastAPI + React redesign) for importing, reconciling, and managing bank transactions across all three instances
 - A **Bulk Payment Uploader** script that reads reconciled transactions from the tracker and records them in the correct Axcelerate instance
 - A **Reconciliation Engine** that auto-classifies bank transactions by student and payment method
 
@@ -180,18 +180,20 @@ claude mcp add axcelerate -- python axcelerate-mcp-server/server.py
 
 ## Bank Transaction Tracker
 
-The `tracker/` directory contains a Streamlit web app for importing, reconciling, and managing bank transactions before uploading them to Axcelerate. It supports **three Axcelerate instances** (MAC, NECGC, NECTECH) with 7 tabs (Received/Spent per instance + MAC-EZIDEBIT for direct debit payments).
+The `tracker/` directory contains a Streamlit web app for importing, reconciling, and managing bank transactions before uploading them to Axcelerate, plus an optional FastAPI + React redesign that shares the same SQLite DB and reconciliation modules. It supports **three Axcelerate instances** (MAC, NECGC, NECTECH) with 7 tabs (Received/Spent per instance + MAC-EZIDEBIT for direct debit payments).
 
 ### Components
 
 | File | Purpose |
 |------|---------|
 | `tracker/app.py` | Streamlit UI — 7-tab layout (MAC/NECGC/NECTECH × Received/Spent + MAC-EZIDEBIT), import files, filter/search, bulk edit, per-instance upload, agent commission calculator |
+| `tracker/api.py` | Optional FastAPI backend for the redesigned React frontend in `tracker/web/`. Reuses `database.py`, `parsers.py`, and `bulk_payment.py` |
+| `tracker/web/` | React/JSX prototype (Babel-in-browser, no build step) — Linear/Stripe-style redesign with hero cards, drawers, and keyboard shortcuts. Served by `api.py` at `/` |
 | `tracker/database.py` | SQLite database layer — `transactions` and `agent_profiles` tables, upsert, bulk update, stats |
 | `tracker/parsers.py` | File parsers — bank CSV (single + combined multi-bank), Xero Excel, and Ezidebit PDF. Instance-aware account mapping. Dedup collision resolution for same-payer/same-amount transactions |
 | `tracker/reconciler.py` | Reconciliation engine — classifies payment method and extracts student from transaction data |
 | `tracker/agent_calculator.py` | Agent commission calculator — verifies agent deduction payments against expected amounts |
-| `tracker/requirements.txt` | Dependencies: `streamlit`, `pandas`, `openpyxl`, `pdfplumber` |
+| `tracker/requirements.txt` | Dependencies: `streamlit`, `pandas`, `openpyxl`, `pdfplumber`, `fastapi`, `uvicorn[standard]`, `python-multipart` |
 | `tracker/tracker.db` | SQLite database (gitignored — contains real transaction data) |
 
 ### Multi-Instance Architecture
@@ -267,6 +269,36 @@ cd tracker
 pip install -r requirements.txt
 streamlit run app.py
 ```
+
+### Optional FastAPI + React redesign
+
+The redesigned UI in `tracker/web/` is a single-page React app loaded via Babel-in-browser (no build step). It talks to `tracker/api.py` (FastAPI), which wraps the same `database.py`, `parsers.py`, and `bulk_payment.py` the Streamlit app already uses — no schema duplication, no parallel SQLite, no copy of the API tokens. The Streamlit `tracker/app.py` is untouched and can run alongside on its own port.
+
+```bash
+cd tracker
+pip install -r requirements.txt          # adds fastapi, uvicorn, python-multipart
+python -m uvicorn api:app --port 8765    # serves the React frontend at http://127.0.0.1:8765
+```
+
+#### API endpoints
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET`    | `/api/meta` | Returns statuses, payment methods, and instance metadata for the frontend |
+| `GET`    | `/api/transactions` | All rows from `tracker.db` |
+| `PATCH`  | `/api/transactions/{id}` | Update `status`, `payment_method`, or `student` (whitelisted fields only) |
+| `POST`   | `/api/transactions/bulk` | Bulk PATCH for multi-select actions in the UI |
+| `POST`   | `/api/transactions/{id}/prepare-upload` | Set `upload_amount` + `upload_description` and flip status to "OK to Upload" (used by the calculator's "Prepare for upload" button) |
+| `POST`   | `/api/import` | Multi-file upload — runs each file through `parsers.detect_and_parse` + `database.upsert_transactions` |
+| `POST`   | `/api/upload/{instance}` | Spawns `python bulk_payment.py --instance <code>` as a subprocess and returns stdout/stderr |
+
+Status and `payment_method` values are validated against the lists in `tracker/api.py`. The `/api/upload/{instance}` endpoint shells out to `bulk_payment.py` — the same `.env` credentials and Axcelerate calls used by the Streamlit app.
+
+#### Editing UX in the React frontend
+
+- **Inline cell editing**: click any status pill, payment-method tag, or student name in the table to edit that single row. Status and method open a floating dropdown anchored to the cell (rendered via React portal so the row's `overflow: hidden` doesn't clip it); student opens an inline text input (Enter saves, Esc cancels, blur saves). Each edit fires `PATCH /api/transactions/{id}` optimistically and rolls back the local row on failure.
+- **Bulk editing**: select rows with the row checkbox or `X` key, then use the floating action bar (`U` = OK to Upload, `R` = Axcelerate Updated, "Set status ▾" for any of the 6 statuses, "Set method ▾" for any of the 5 methods). Bulk operations POST to `/api/transactions/bulk`.
+- **Shared DB, no auto-refresh**: both UIs read/write the same `tracker.db`. Changes are durable in either direction, but neither polls — click "Refresh" in the React top-bar (or reload the page) to pick up edits made in Streamlit since the React tab was loaded. Last-write-wins on concurrent edits to the same row.
 
 ## Bulk Payment Uploader
 

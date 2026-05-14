@@ -143,6 +143,7 @@ Reconciliation is implemented in the **Bank Transaction Tracker** app (`tracker/
 | `tracker/parsers.py` | File parsers — bank CSV (single + combined multi-bank), Xero Excel, and Ezidebit PDF. Calls reconciler automatically on import |
 | `tracker/database.py` | SQLite database — stores transactions with deduplication, status tracking, bulk updates |
 | `tracker/app.py` | Streamlit web UI — import files, review/edit reconciled transactions, mark for upload |
+| `tracker/api.py` + `tracker/web/` | Optional FastAPI + React redesign of the same UI, sharing `tracker.db` and all reconciliation modules |
 | `bulk_payment.py` | Upstream: reads "OK to Upload" rows from tracker DB and records payments in Axcelerate |
 
 ### Reconciliation Engine (`tracker/reconciler.py`)
@@ -184,7 +185,7 @@ Bank CSV / Xero Excel / Ezidebit PDF
     ↓ parsers.py (detect_and_parse, auto-detect instance from account)
     ↓ reconciler.py (auto-classify student + method; Ezidebit pre-populated)
     ↓ database.py (upsert with dedup, instance + location columns)
-    ↓ app.py (7-tab Streamlit UI: MAC/NECGC/NECTECH × Received/Spent + MAC-EZIDEBIT)
+    ↓ app.py (Streamlit) or api.py + web/ (FastAPI + React redesign) — both share tracker.db
     ↓ bulk_payment.py --instance <CODE> (upload to correct Axcelerate instance)
 ```
 

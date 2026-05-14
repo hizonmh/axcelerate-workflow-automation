@@ -8,7 +8,7 @@ A Claude AI command library, MCP server, and automation toolkit for managing wor
 |---|---|---|
 | Claude Code skills | [.claude/commands/](.claude/commands/) | Nine `/axcelerate-*` slash commands, one per API domain (contact, course, enrol, invoice, payment, email, report, reconcile, workflow) |
 | MCP server | [axcelerate-mcp-server/](axcelerate-mcp-server/) | FastMCP server exposing 30+ Axcelerate operations as tools for any MCP-compatible client |
-| Bank Transaction Tracker | [tracker/](tracker/) | Streamlit web app for importing, reconciling, and bulk-editing bank transactions before upload |
+| Bank Transaction Tracker | [tracker/](tracker/) | Two front-ends share the same SQLite DB: Streamlit [`tracker/app.py`](tracker/app.py) and an optional FastAPI + React redesign ([`tracker/api.py`](tracker/api.py) + [`tracker/web/`](tracker/web/)) |
 | Bulk Payment Uploader | [bulk_payment.py](bulk_payment.py) | Reads "OK to Upload" rows from the tracker and records them via the correct Axcelerate instance |
 | Reconciliation Engine | [tracker/reconciler.py](tracker/reconciler.py) | Auto-classifies bank transactions by student and payment method |
 | API reference | [.claude/axcelerate_api_reference.md](.claude/axcelerate_api_reference.md) | Full Axcelerate REST API reference (consulted by all commands) |
@@ -75,18 +75,25 @@ The `/axcelerate-workflow` command is a master orchestrator that chains multiple
 
 ### Bank Transaction Tracker
 
+Two front-ends are available — pick whichever you prefer. Both read from and write to the same `tracker/tracker.db` via the same `database.py`, so edits in one are visible in the other (click "Refresh" on the React app or interact with Streamlit to pick up the other's changes — neither polls).
+
 ```bash
 cd tracker
+
+# Streamlit (original)
 streamlit run app.py
+
+# FastAPI + React redesign — open http://127.0.0.1:8765
+python -m uvicorn api:app --port 8765 --reload
 ```
 
 Workflow:
 1. **Import** — upload bank CSVs, Xero Excel exports, or Ezidebit PDF reports. Parsers auto-detect the source and tag each row with its instance (MAC / NECGC / NEC / EZIDEBIT). Ezidebit imports only include "Paid" rows that have a settlement date (pending/failed rows are excluded).
-2. **Review** — filter, search, and bulk-edit student/status/payment method across seven tabs (Received + Spent for each instance, plus MAC-EZIDEBIT for direct debits).
+2. **Review** — filter, search, and bulk-edit student/status/payment method across seven tabs (Received + Spent for each instance, plus MAC-EZIDEBIT for direct debits). In the React app, click a status pill, method tag, or student name to edit it inline; select multiple rows and use the floating action bar for bulk changes.
 3. **Mark for upload** — set status to `OK to Upload` for verified rows.
-4. **Upload** — use the per-instance buttons in the "Upload to Axcelerate" expander, which run `bulk_payment.py` with the correct `--instance` flag.
+4. **Upload** — use the per-instance buttons (Streamlit's "Upload to Axcelerate" expander, or the green Upload button on each React hero card). Both shell out to `bulk_payment.py --instance <CODE>`.
 
-The tracker also includes an **agent commission calculator** for verifying agent deduction payments (pre-fills from a selected transaction row, supports per-agent profiles with commission rate, GST, admin fee waiver, and bonus).
+The tracker also includes an **agent commission calculator** for verifying agent deduction payments (pre-fills from a selected transaction row, supports per-agent profiles with commission rate, GST, admin fee waiver, and bonus). In the React app it's a side drawer that opens when you click the calculator icon on any Agent Deduction row.
 
 ### Bulk Payment Uploader (CLI)
 

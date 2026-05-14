@@ -321,7 +321,7 @@ python bulk_payment.py --instance NEC       # NEC Melbourne (NECTECH)
 python bulk_payment.py --instance EZIDEBIT  # Ezidebit direct debits (uses MAC credentials)
 ```
 
-The tracker app's "Upload to Axcelerate" section has per-instance buttons that invoke this script automatically.
+Both tracker front-ends invoke this script automatically: the Streamlit app via the "Upload to Axcelerate" expander, and the FastAPI + React redesign via the green Upload button on each instance hero card (which POSTs to `/api/upload/{instance}`).
 
 **Field mapping (Tracker → Axcelerate API):**
 

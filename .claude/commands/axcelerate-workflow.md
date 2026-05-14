@@ -246,7 +246,9 @@ This is the end-to-end payment processing pipeline using the Bank Transaction Tr
 
 ```
 Step 1: Import bank files into tracker
-   → Run: cd tracker && streamlit run app.py
+   → Run either UI (both share tracker.db):
+        Streamlit: cd tracker && streamlit run app.py
+        React:     cd tracker && python -m uvicorn api:app --port 8765    # http://127.0.0.1:8765
    → Upload bank CSV, Xero Excel, or Ezidebit PDF files via the UI
    → Parsers auto-detect instance from bank account name
    → Reconciler auto-classifies student + payment method
@@ -263,7 +265,8 @@ Step 2: Review and reconcile in tracker UI (7 tabs)
    → Mark reviewed rows as "OK to Upload"
 
 Step 3: Upload to Axcelerate (per-instance)
-   → Use the "Upload to Axcelerate" expander in the tracker UI
+   → Streamlit: "Upload to Axcelerate" expander, per-instance buttons
+   → React: green "Upload" button on each instance hero card → confirmation drawer → POST /api/upload/{instance}
    → Each instance has its own upload button (MAC, NECGC, NECTECH, MAC-EZIDEBIT)
    → Or run manually: python bulk_payment.py --instance <MAC|NECGC|NEC|EZIDEBIT>
    → Uses instance-specific API credentials from .env (EZIDEBIT uses MAC credentials)
@@ -279,6 +282,7 @@ Step 3: Upload to Axcelerate (per-instance)
 | File | Role |
 |------|------|
 | `tracker/app.py` | Streamlit UI — 7-tab layout with per-instance upload (includes MAC-EZIDEBIT) |
+| `tracker/api.py` + `tracker/web/` | Optional FastAPI + React redesign — same DB, same parsers, same bulk_payment.py; adds inline cell editing and confirmation drawers |
 | `tracker/parsers.py` | Bank CSV, Xero Excel, and Ezidebit PDF parsers with instance-aware account mapping |
 | `tracker/reconciler.py` | Auto-classification engine |
 | `tracker/database.py` | SQLite storage with dedup, `instance` and `location` columns |
