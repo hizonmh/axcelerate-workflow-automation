@@ -3,7 +3,14 @@ import pandas as pd
 import subprocess
 import sys
 import os
-from database import init_db, upsert_transactions, get_all_transactions, bulk_update_status
+from database import (
+    init_db,
+    upsert_transactions,
+    get_all_transactions,
+    bulk_update_status,
+    bulk_update_fields,
+    set_upload_amount,
+)
 from parsers import detect_and_parse
 from agent_calculator import verify_payment_all_rates
 
@@ -231,20 +238,14 @@ with st.expander("Agent Commission Calculator", expanded=_calc_expanded):
                             if st.button(f"Prepare for Upload ({rate_pct}%)", type="primary", key=f"prep_upload_{rate_pct}", use_container_width=True):
                                 _prep_txn_id = st.session_state.get("_calc_prefill_txn_id")
                                 if _prep_txn_id:
-                                    from database import get_connection
-                                    from datetime import datetime
-                                    _conn = get_connection()
-                                    _conn.execute(
-                                        "UPDATE transactions SET upload_amount = ?, upload_description = ?, status = 'OK to Upload', updated_at = ? WHERE id = ?",
-                                        (
-                                            result["invoice_total"],
-                                            f"Agent deducted {result['total_deduction']:,.2f} - paid {result['actual_payment']:,.2f}",
-                                            datetime.now().isoformat(),
-                                            _prep_txn_id,
+                                    set_upload_amount(
+                                        row_id=_prep_txn_id,
+                                        upload_amount=result["invoice_total"],
+                                        upload_description=(
+                                            f"Agent deducted {result['total_deduction']:,.2f} "
+                                            f"- paid {result['actual_payment']:,.2f}"
                                         ),
                                     )
-                                    _conn.commit()
-                                    _conn.close()
                                     st.toast(f"Transaction prepared: upload amount ${result['invoice_total']:,.2f}")
                                     for k in ["calc_txn_info", "calc_actual", "_calc_prefill_txn_id", "calc_expanded"]:
                                         st.session_state.pop(k, None)
@@ -432,34 +433,12 @@ def render_transaction_table(tab_df: pd.DataFrame, tab_key: str):
             with col_e4:
                 st.markdown("<br>", unsafe_allow_html=True)
                 if st.button("Apply", type="primary", use_container_width=True, key=f"apply_edit_{tab_key}"):
-                    from database import get_connection
-                    from datetime import datetime
-                    conn = get_connection()
-                    changes = 0
-                    now = datetime.now().isoformat()
-                    for rid in selected_ids:
-                        updates = []
-                        params = []
-                        if new_student:
-                            updates.append("student = ?")
-                            params.append(new_student)
-                        if new_status != "(no change)":
-                            updates.append("status = ?")
-                            params.append(new_status)
-                        if new_method != "(no change)":
-                            updates.append("payment_method = ?")
-                            params.append(new_method)
-                        if updates:
-                            updates.append("updated_at = ?")
-                            params.append(now)
-                            params.append(int(rid))
-                            conn.execute(
-                                f"UPDATE transactions SET {', '.join(updates)} WHERE id = ?",
-                                params,
-                            )
-                            changes += 1
-                    conn.commit()
-                    conn.close()
+                    changes = bulk_update_fields(
+                        row_ids=selected_ids,
+                        student=new_student or None,
+                        status=new_status if new_status != "(no change)" else None,
+                        payment_method=new_method if new_method != "(no change)" else None,
+                    )
                     if changes:
                         st.toast(f"Updated {changes} transaction(s)")
                         st.session_state.table_key += 1

@@ -16,9 +16,14 @@ payment_report_*.csv
 
 # Bank files — real bank transaction CSVs and Xero reconciliation exports
 bank files/
+Bank files/
 
 # Tracker database — contains real transaction data
 tracker/tracker.db
+tracker.db
+
+# Local calculator workbook — may contain real student/agent data
+calculator.xlsx
 
 # Python
 __pycache__/

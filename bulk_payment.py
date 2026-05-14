@@ -13,6 +13,11 @@ After processing, updates tracker status:
   Allocated   → "Axcelerate Updated"
   Unallocated → "Unallocated"
   Error       → "Check Manually"
+
+Idempotency: a successful POST writes the returned TRANSACTIONID into the
+tracker row BEFORE flipping the status. Re-running this script skips any row
+that already has axcelerate_transaction_id set, so a network blip after a
+successful POST cannot cause a duplicate payment.
 """
 
 import argparse
@@ -20,9 +25,16 @@ import csv
 import os
 import re
 import sqlite3
+import sys
+import time
 from datetime import datetime
 import requests
 from dotenv import load_dotenv
+
+# Reuse the tracker's DB helpers so we have a single source of truth for
+# idempotency writes and "check manually" transitions.
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "tracker"))
+from database import record_axcelerate_post, mark_check_manually  # noqa: E402
 
 load_dotenv()
 
@@ -45,7 +57,16 @@ API_TOKEN = os.getenv(token_key)
 WS_TOKEN  = os.getenv(ws_key)
 BASE      = os.getenv(url_key)
 
+if not API_TOKEN or not WS_TOKEN or not BASE:
+    missing = [k for k, v in [(token_key, API_TOKEN), (ws_key, WS_TOKEN), (url_key, BASE)] if not v]
+    print(f"ERROR: Missing required environment variables for instance '{instance}': {', '.join(missing)}", file=sys.stderr)
+    raise SystemExit(2)
+
 headers = {"apitoken": API_TOKEN, "wstoken": WS_TOKEN}
+
+# Per-request timeout for every Axcelerate HTTP call. Without this, a hung
+# connection would freeze the whole batch until the parent process kills it.
+HTTP_TIMEOUT = 30  # seconds
 
 print(f"Instance: {instance}  |  API base: {BASE}")
 
@@ -68,6 +89,44 @@ MAC_ID_RE = re.compile(r"^MAC\s?\d+$", re.IGNORECASE)
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "tracker", "tracker.db")
 
+
+def _request_with_retry(method: str, url: str, **kwargs):
+    """Wrap requests.request with a small retry on transient failures.
+
+    Retries on connection errors, read timeouts, 429, and 5xx responses
+    (with exponential backoff). 4xx other than 429 are not retried — those
+    indicate a real client-side problem that won't fix itself.
+    """
+    kwargs.setdefault("timeout", HTTP_TIMEOUT)
+    attempts = 3
+    backoff = 1.5
+    last_exc: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            r = requests.request(method, url, **kwargs)
+        except (requests.ConnectionError, requests.Timeout) as e:
+            last_exc = e
+            if attempt == attempts:
+                raise
+            time.sleep(backoff ** attempt)
+            continue
+        if r.status_code in (429,) or 500 <= r.status_code < 600:
+            if attempt == attempts:
+                return r  # let caller raise_for_status
+            # Honour Retry-After if present, else backoff
+            ra = r.headers.get("Retry-After")
+            try:
+                wait = float(ra) if ra else backoff ** attempt
+            except ValueError:
+                wait = backoff ** attempt
+            time.sleep(wait)
+            continue
+        return r
+    # Unreachable, but satisfies type checkers
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("retry loop exited without result")
+
 # ── LOAD ROWS FROM TRACKER DB ───────────────────────────────────────
 
 print(f"Loading 'OK to Upload' transactions from: {DB_PATH}\n")
@@ -75,7 +134,9 @@ print(f"Loading 'OK to Upload' transactions from: {DB_PATH}\n")
 conn = sqlite3.connect(DB_PATH)
 conn.row_factory = sqlite3.Row
 rows_raw = conn.execute(
-    "SELECT id, student, date, amount, payment_method, bank_account, upload_amount, upload_description FROM transactions "
+    "SELECT id, student, date, amount, payment_method, bank_account, "
+    "       upload_amount, upload_description, axcelerate_transaction_id "
+    "FROM transactions "
     "WHERE status = 'OK to Upload' AND instance = ? ORDER BY date",
     (instance,),
 ).fetchall()
@@ -95,7 +156,8 @@ failed_count = 0
 failed_rows  = []
 skipped_rows = []
 
-# Track row_id → new status for DB updates
+# Track row_id → new status (used only for the per-instance summary at the end;
+# all DB writes happen via record_axcelerate_post / mark_check_manually).
 status_updates = {}  # {tracker_row_id: new_status}
 
 for row in rows:
@@ -105,10 +167,24 @@ for row in rows:
     raw_amount     = str(row["amount"]).strip().replace(",", "").replace("$", "")
     payment_method = (row["payment_method"] or "Direct Deposit").strip()
     reference      = (row["bank_account"] or "").strip()
+    existing_tx_id = (row.get("axcelerate_transaction_id") or "").strip()
+
+    # ── IDEMPOTENCY GUARD ──
+    # If a previous run already posted this row to Axcelerate (we have the
+    # returned TRANSACTIONID), skip it. This prevents duplicate posts when a
+    # row was somehow flipped back to "OK to Upload" without clearing the id.
+    if existing_tx_id:
+        skipped_rows.append({
+            "id": tracker_id, "student": raw_id, "amount": raw_amount,
+            "reason": f"Already posted to Axcelerate (TRANSACTIONID={existing_tx_id})",
+        })
+        print(f"SKIP row {tracker_id} | already posted (TRANSACTIONID={existing_tx_id})")
+        continue
 
     # Validate student field — must be numeric ID or MAC ID
     if not raw_id or raw_id == "Unknown":
         skipped_rows.append({"id": tracker_id, "student": raw_id, "amount": raw_amount, "reason": "Empty or Unknown student"})
+        mark_check_manually(tracker_id)
         status_updates[tracker_id] = "Check Manually"
         print(f"SKIP row {tracker_id} | Student='{raw_id}' — not a valid ID, marking 'Check Manually'")
         continue
@@ -118,19 +194,38 @@ for row in rows:
 
     if not is_numeric and not is_mac_id:
         skipped_rows.append({"id": tracker_id, "student": raw_id, "amount": raw_amount, "reason": "Student is a name, not a resolvable ID"})
+        mark_check_manually(tracker_id)
         status_updates[tracker_id] = "Check Manually"
         print(f"SKIP row {tracker_id} | Student='{raw_id}' — not a numeric/MAC ID, marking 'Check Manually'")
         continue
 
-    # Parse date from YYYY-MM-DD (DB format) → MM/DD/YYYY for API
+    # Strict date parsing — DB column is canonical YYYY-MM-DD, no fallback.
+    # The previous MM/DD/YYYY fallback could silently misinterpret an ambiguous
+    # row like '04/05/2026' as April 5 when it meant 4 May.
     try:
         dt = datetime.strptime(raw_date, "%Y-%m-%d")
     except ValueError:
-        # Try MM/DD/YYYY as fallback
-        dt = datetime.strptime(raw_date, "%m/%d/%Y")
+        skipped_rows.append({
+            "id": tracker_id, "student": raw_id, "amount": raw_amount,
+            "reason": f"Bad date '{raw_date}' (must be YYYY-MM-DD)",
+        })
+        mark_check_manually(tracker_id)
+        status_updates[tracker_id] = "Check Manually"
+        print(f"SKIP row {tracker_id} | Bad date '{raw_date}' — marking 'Check Manually'")
+        continue
     trans_date = dt.strftime("%m/%d/%Y")
 
-    payment_method_id = METHOD_MAP.get(payment_method.lower(), 4)
+    # Strict payment method — silent default to EFT was hiding tracker typos.
+    if payment_method.lower() not in METHOD_MAP:
+        skipped_rows.append({
+            "id": tracker_id, "student": raw_id, "amount": raw_amount,
+            "reason": f"Unknown payment method '{payment_method}'",
+        })
+        mark_check_manually(tracker_id)
+        status_updates[tracker_id] = "Check Manually"
+        print(f"SKIP row {tracker_id} | Unknown payment method '{payment_method}' — marking 'Check Manually'")
+        continue
+    payment_method_id = METHOD_MAP[payment_method.lower()]
     amount = float(raw_amount)
 
     # Agent Deduction: use upload_amount (full invoice amount) if set
@@ -150,10 +245,11 @@ for row in rows:
         if is_numeric:
             contact_id = int(raw_id)
         else:
-            search = requests.get(
+            search = _request_with_retry(
+                "GET",
                 f"{BASE}/contacts/search",
                 headers=headers,
-                params={"optionalID": raw_id}
+                params={"optionalID": raw_id},
             )
             search.raise_for_status()
             results = search.json()
@@ -162,10 +258,15 @@ for row in rows:
             contact_id = int(results[0]["CONTACTID"])
             print(f"  Resolved {raw_id} -> CONTACTID={contact_id}")
 
-        # Check for a matching invoice (balance == api_amount)
-        invoice_id = None
+        # ── INVOICE MATCH ──
+        # Collect ALL invoices whose balance matches the amount across the open
+        # statuses. If multiple match, allocate to the earliest by INVOICEDATE
+        # (tie-broken by lowest INVOICEID) — students typically pay oldest
+        # outstanding invoices first.
+        matches: list[dict] = []
         for status in ["SENT", "PARTIAL", "OVERDUE"]:
-            inv_r = requests.get(
+            inv_r = _request_with_retry(
+                "GET",
                 f"{BASE}/accounting/invoice/",
                 headers=headers,
                 params={"contactID": contact_id, "status": status},
@@ -174,11 +275,40 @@ for row in rows:
             inv_results = inv_r.json()
             if isinstance(inv_results, list):
                 for inv in inv_results:
-                    if abs(float(inv.get("BALANCE", 0)) - api_amount) < 0.01:
-                        invoice_id = inv["INVOICEID"]
-                        break
-            if invoice_id:
-                break
+                    try:
+                        balance = float(inv.get("BALANCE", 0))
+                    except (TypeError, ValueError):
+                        continue
+                    # Compare in cents to avoid float-equality drift.
+                    if round(balance * 100) == round(api_amount * 100):
+                        matches.append(inv)
+
+        # De-dup matches by INVOICEID in case the API returned the same invoice
+        # under multiple statuses.
+        unique_by_id: dict = {}
+        for m in matches:
+            unique_by_id.setdefault(m.get("INVOICEID"), m)
+        matches = list(unique_by_id.values())
+
+        if len(matches) > 1:
+            # Sort: earliest INVOICEDATE first, then lowest INVOICEID.
+            # Missing/unparseable dates sort last so they don't silently win.
+            def _sort_key(inv: dict) -> tuple:
+                try:
+                    inv_id = int(inv.get("INVOICEID") or 0)
+                except (TypeError, ValueError):
+                    inv_id = 0
+                return (inv.get("INVOICEDATE") or "9999-99-99", inv_id)
+            matches.sort(key=_sort_key)
+            ids = ", ".join(str(m.get("INVOICEID")) for m in matches)
+            chosen = matches[0]
+            print(
+                f"  Multiple invoices match ${api_amount:.2f} (IDs: {ids}). "
+                f"Picking earliest -> INVOICEID={chosen.get('INVOICEID')} "
+                f"dated {chosen.get('INVOICEDATE')}."
+            )
+
+        invoice_id = matches[0]["INVOICEID"] if matches else None
 
         # Record payment — allocated if matching invoice found, otherwise unallocated
         post_data = {
@@ -195,7 +325,8 @@ for row in rows:
         else:
             print(f"  No matching invoice — recording as unallocated credit")
 
-        r = requests.post(
+        r = _request_with_retry(
+            "POST",
             f"{BASE}/accounting/transaction/",
             headers=headers,
             data=post_data,
@@ -204,6 +335,19 @@ for row in rows:
         tx = r.json()
 
         allocated = "Allocated" if invoice_id else "Unallocated"
+        new_status = "Axcelerate Updated" if invoice_id else "Unallocated"
+
+        # Persist the returned TRANSACTIONID *before* flipping status. If the
+        # process dies between this write and any subsequent work, the
+        # idempotency guard at the top of the loop will skip the row on the
+        # next run instead of double-posting.
+        record_axcelerate_post(
+            row_id=tracker_id,
+            transaction_id=str(tx["TRANSACTIONID"]),
+            invoice_id=str(invoice_id) if invoice_id else None,
+            new_status=new_status,
+        )
+
         transactions.append({
             "tracker_id": tracker_id,
             "id":         raw_id,
@@ -216,41 +360,23 @@ for row in rows:
             "invoice_id": invoice_id or "",
             "status":     allocated,
         })
+        status_updates[tracker_id] = new_status
         print(f"    OK — TRANSACTIONID={tx['TRANSACTIONID']} | Amount={tx['AMOUNT']} | {allocated}")
-
-        # Set tracker status based on allocation
-        if invoice_id:
-            status_updates[tracker_id] = "Axcelerate Updated"
-        else:
-            status_updates[tracker_id] = "Unallocated"
 
     except requests.exceptions.HTTPError as e:
         body = e.response.text if e.response is not None else "(no body)"
         failed_count += 1
         failed_rows.append({"tracker_id": tracker_id, "id": raw_id, "amount": raw_amount, "error": f"{e} | {body}"})
+        mark_check_manually(tracker_id)
         status_updates[tracker_id] = "Check Manually"
         print(f"  FAILED — {e}")
         print(f"  Response body: {body}")
     except Exception as e:
         failed_count += 1
         failed_rows.append({"tracker_id": tracker_id, "id": raw_id, "amount": raw_amount, "error": str(e)})
+        mark_check_manually(tracker_id)
         status_updates[tracker_id] = "Check Manually"
         print(f"  FAILED — {e}")
-
-# ── UPDATE TRACKER DB ────────────────────────────────────────────────
-
-if status_updates:
-    print(f"\nUpdating {len(status_updates)} tracker row(s)...")
-    conn = sqlite3.connect(DB_PATH)
-    now = datetime.now().isoformat()
-    for row_id, new_status in status_updates.items():
-        conn.execute(
-            "UPDATE transactions SET status = ?, updated_at = ? WHERE id = ?",
-            (new_status, now, row_id),
-        )
-    conn.commit()
-    conn.close()
-    print("Tracker statuses updated.")
 
 # ── SESSION TRANSACTION REPORT ───────────────────────────────────────
 print("\n" + "=" * 130)
@@ -274,7 +400,7 @@ print(f"\nSuccessful: {len(transactions)}  |  Failed: {failed_count}  |  Skipped
 print(f"Allocated: {allocated_count}  |  Unallocated: {unallocated_count}")
 
 if skipped_rows:
-    print("\nSkipped rows (marked 'Check Manually'):")
+    print("\nSkipped rows:")
     for sr in skipped_rows:
         print(f"  Row {sr['id']} | Student='{sr['student']}' | ${sr['amount']} — {sr['reason']}")
 
@@ -344,7 +470,7 @@ with open(report_path, "a", newline="", encoding="utf-8") as f:
             "reference":        "",
             "invoice_id":       "",
             "status":           "Skipped",
-            "tracker_status":   "Check Manually",
+            "tracker_status":   status_updates.get(sr["id"], ""),
             "error":            sr["reason"],
         })
 

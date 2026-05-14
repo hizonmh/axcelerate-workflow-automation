@@ -11,6 +11,15 @@ def get_connection():
     return conn
 
 
+def _table_columns(conn, table: str) -> set[str]:
+    return {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _ensure_column(conn, table: str, column: str, definition: str) -> None:
+    if column not in _table_columns(conn, table):
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
 def init_db():
     conn = get_connection()
     conn.execute("""
@@ -31,41 +40,21 @@ def init_db():
             created_at TEXT NOT NULL
         )
     """)
-    # Migration: add bank_account column if missing (existing DBs)
-    try:
-        conn.execute("SELECT bank_account FROM transactions LIMIT 1")
-    except Exception:
-        conn.execute("ALTER TABLE transactions ADD COLUMN bank_account TEXT NOT NULL DEFAULT ''")
-    # Migration: add student column if missing
-    try:
-        conn.execute("SELECT student FROM transactions LIMIT 1")
-    except Exception:
-        conn.execute("ALTER TABLE transactions ADD COLUMN student TEXT NOT NULL DEFAULT ''")
-    # Migration: add updated_at column if missing
-    try:
-        conn.execute("SELECT updated_at FROM transactions LIMIT 1")
-    except Exception:
-        conn.execute("ALTER TABLE transactions ADD COLUMN updated_at TEXT")
-    # Migration: add instance column if missing (MAC = default for existing rows)
-    try:
-        conn.execute("SELECT instance FROM transactions LIMIT 1")
-    except Exception:
-        conn.execute("ALTER TABLE transactions ADD COLUMN instance TEXT NOT NULL DEFAULT 'MAC'")
-    # Migration: add location column if missing (for Ezidebit campus segregation)
-    try:
-        conn.execute("SELECT location FROM transactions LIMIT 1")
-    except Exception:
-        conn.execute("ALTER TABLE transactions ADD COLUMN location TEXT NOT NULL DEFAULT ''")
-    # Migration: add upload_amount column if missing (for agent deduction full amount)
-    try:
-        conn.execute("SELECT upload_amount FROM transactions LIMIT 1")
-    except Exception:
-        conn.execute("ALTER TABLE transactions ADD COLUMN upload_amount REAL")
-    # Migration: add upload_description column if missing (for agent deduction description)
-    try:
-        conn.execute("SELECT upload_description FROM transactions LIMIT 1")
-    except Exception:
-        conn.execute("ALTER TABLE transactions ADD COLUMN upload_description TEXT")
+    # Schema migrations — use PRAGMA table_info so we don't swallow real DB errors.
+    _ensure_column(conn, "transactions", "bank_account", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "transactions", "student", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "transactions", "updated_at", "TEXT")
+    _ensure_column(conn, "transactions", "instance", "TEXT NOT NULL DEFAULT 'MAC'")
+    _ensure_column(conn, "transactions", "location", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "transactions", "upload_amount", "REAL")
+    _ensure_column(conn, "transactions", "upload_description", "TEXT")
+    # Idempotency: when bulk_payment.py successfully posts to Axcelerate it writes
+    # the returned TRANSACTIONID/INVOICEID here BEFORE flipping status. Re-runs
+    # then skip rows that already have a tx id, so a network blip after a
+    # successful POST cannot cause a duplicate payment.
+    _ensure_column(conn, "transactions", "axcelerate_transaction_id", "TEXT")
+    _ensure_column(conn, "transactions", "axcelerate_invoice_id", "TEXT")
+
     # Agent profiles table
     conn.execute("""
         CREATE TABLE IF NOT EXISTS agent_profiles (
@@ -196,25 +185,115 @@ def get_all_transactions() -> list[dict]:
     return [dict(r) for r in rows]
 
 
+# Whitelisted columns for any "set arbitrary field" helper. Anything outside
+# this set must use a dedicated function — no string-built UPDATEs.
+_USER_EDITABLE_FIELDS = {"status", "payment_method", "student"}
+
+
 def update_transaction_field(row_id: int, field: str, value: str):
-    allowed = {"status", "payment_method", "student"}
-    if field not in allowed:
+    if field not in _USER_EDITABLE_FIELDS:
         raise ValueError(f"Cannot update field: {field}")
     conn = get_connection()
+    # Field name comes only from the whitelist above, so this is safe.
     conn.execute(f"UPDATE transactions SET {field} = ? WHERE id = ?", (value, row_id))
     conn.commit()
     conn.close()
 
 
-def bulk_update_status(row_ids: list[int], status: str):
+def bulk_update_fields(
+    row_ids: list[int],
+    student: str | None = None,
+    status: str | None = None,
+    payment_method: str | None = None,
+) -> int:
+    """Update one or more whitelisted fields on the given rows in a single transaction.
+
+    Returns the number of rows touched. Pass None for any field to leave it alone.
+    """
     if not row_ids:
-        return
-    conn = get_connection()
-    now = datetime.now().isoformat()
+        return 0
+    # Build the SET clause from explicit branches — never from caller-supplied keys.
+    set_parts: list[str] = []
+    params: list = []
+    if student is not None:
+        set_parts.append("student = ?")
+        params.append(student)
+    if status is not None:
+        set_parts.append("status = ?")
+        params.append(status)
+    if payment_method is not None:
+        set_parts.append("payment_method = ?")
+        params.append(payment_method)
+    if not set_parts:
+        return 0
+    set_parts.append("updated_at = ?")
+    params.append(datetime.now().isoformat())
+
     placeholders = ",".join("?" * len(row_ids))
+    sql = f"UPDATE transactions SET {', '.join(set_parts)} WHERE id IN ({placeholders})"
+    conn = get_connection()
+    conn.execute(sql, params + [int(r) for r in row_ids])
+    conn.commit()
+    conn.close()
+    return len(row_ids)
+
+
+def bulk_update_status(row_ids: list[int], status: str):
+    bulk_update_fields(row_ids, status=status)
+
+
+def set_upload_amount(row_id: int, upload_amount: float, upload_description: str, status: str = "OK to Upload") -> None:
+    """Set the agent-deduction upload override fields and flip status."""
+    conn = get_connection()
     conn.execute(
-        f"UPDATE transactions SET status = ?, updated_at = ? WHERE id IN ({placeholders})",
-        [status, now] + row_ids,
+        "UPDATE transactions SET upload_amount = ?, upload_description = ?, status = ?, updated_at = ? WHERE id = ?",
+        (
+            float(upload_amount),
+            upload_description,
+            status,
+            datetime.now().isoformat(),
+            int(row_id),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def record_axcelerate_post(
+    row_id: int,
+    transaction_id: str,
+    invoice_id: str | None,
+    new_status: str,
+) -> None:
+    """Persist the Axcelerate TRANSACTIONID/INVOICEID returned by a successful POST.
+
+    Called by bulk_payment.py BEFORE flipping the status so that, even if the
+    process dies between this write and the status flip, a future re-run sees
+    the populated transaction_id and skips the row instead of double-posting.
+    """
+    conn = get_connection()
+    conn.execute(
+        """UPDATE transactions
+           SET axcelerate_transaction_id = ?, axcelerate_invoice_id = ?,
+               status = ?, updated_at = ?
+           WHERE id = ?""",
+        (
+            str(transaction_id),
+            str(invoice_id) if invoice_id else None,
+            new_status,
+            datetime.now().isoformat(),
+            int(row_id),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def mark_check_manually(row_id: int) -> None:
+    conn = get_connection()
+    conn.execute(
+        "UPDATE transactions SET status = ?, updated_at = ? WHERE id = ?",
+        ("Check Manually", datetime.now().isoformat(), int(row_id)),
     )
     conn.commit()
     conn.close()
