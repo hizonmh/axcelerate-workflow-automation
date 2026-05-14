@@ -143,13 +143,38 @@ OWN_ENTITIES: list[str] = [
     "new england school of english",
     "new england college",
     "necgc",
+    # NECTECH (Melbourne)
+    "nectech",
+    "nec tech",
+    "new england college of technology",
+    "necmelb",
+    "nec melbourne",
 ]
 
 # Student ID regex: 8-digit number starting with 1
 STUDENT_ID_RE = re.compile(r"(?<!\d)(1\d{7})(?!\d)")
 
-# MAC ID regex: MAC + optional space + 4 digits
-MAC_ID_RE = re.compile(r"\bMAC\s?(\d{4})\b", re.IGNORECASE)
+# Strong-context anchor: explicit ID/REF/STUDENT/SID/PMT label immediately
+# preceding the 8-digit number. We trust these anywhere; bare 8-digit numbers
+# are only trusted when they appear in a reference column (Col H/I) and no
+# other 8-digit number competes with them.
+ANCHORED_ID_RE = re.compile(
+    r"(?:\b(?:STUDENT(?:\s*ID)?|SID|REF(?:ERENCE)?|ID|PMT|INV|RECEIPT)[\s:#-]*)?(1\d{7})(?!\d)",
+    re.IGNORECASE,
+)
+STRONG_ANCHOR_RE = re.compile(
+    r"\b(?:STUDENT(?:\s*ID)?|SID|REF(?:ERENCE)?|ID|PMT|INV|RECEIPT)[\s:#-]*(1\d{7})(?!\d)",
+    re.IGNORECASE,
+)
+
+# 8-digit student ID glued directly to letters (e.g. "PULI13097828") — students
+# often type name+ID together when filling a payment reference. Unambiguous
+# because phone numbers, BSBs, and bank account numbers in transaction text are
+# space- or punctuation-separated, never glued to letters.
+LETTER_GLUED_ID_RE = re.compile(r"(?<=[A-Za-z])(1\d{7})(?!\d)")
+
+# MAC ID regex: MAC + optional space + 4–6 digits (allow growth past MAC9999)
+MAC_ID_RE = re.compile(r"\bMAC\s?(\d{4,6})\b", re.IGNORECASE)
 
 
 def _is_own_entity(text: str) -> bool:
@@ -189,10 +214,32 @@ def _clean_student_name(text: str) -> str:
     return result
 
 
-def _extract_student_id(text: str) -> str | None:
-    """Extract 8-digit student ID starting with 1 from text."""
+def _extract_student_id(text: str, *, trust_unanchored: bool = True) -> str | None:
+    """Extract 8-digit student ID starting with 1 from text.
+
+    Args:
+        text: text to search.
+        trust_unanchored: if False, only return an ID that has a STUDENT/REF/ID/SID/PMT
+            anchor immediately before it. Use this for noisy fields like
+            description or payer where bare 8-digit numbers can be phone
+            numbers, BSBs, or bank account numbers. Reference columns
+            (col_h/col_i) can keep the default.
+    """
     if not text:
         return None
+    if not trust_unanchored:
+        m = STRONG_ANCHOR_RE.search(text)
+        if m:
+            return m.group(1)
+        # Also accept IDs glued directly to letters — see LETTER_GLUED_ID_RE.
+        glued = LETTER_GLUED_ID_RE.findall(text)
+        if glued:
+            return glued[-1]
+        return None
+    # Prefer anchored matches if any, else fall back to the last bare match.
+    anchored = STRONG_ANCHOR_RE.findall(text)
+    if anchored:
+        return anchored[-1]
     matches = STUDENT_ID_RE.findall(text)
     if matches:
         return matches[-1]  # Last match — student IDs tend to come after REF: etc.
@@ -209,13 +256,23 @@ def _extract_mac_id(text: str) -> str | None:
     return None
 
 
+def _agent_matches(text_lower: str, agent: str) -> bool:
+    """Word-boundary match for an agent name fragment.
+
+    Plain `agent in text` matched short tokens like 'drm' or 'shivani' inside
+    unrelated names. We require word boundaries on both sides — agent names
+    may include spaces and other regex metacharacters, so escape them.
+    """
+    return re.search(r"(?<!\w)" + re.escape(agent) + r"(?!\w)", text_lower) is not None
+
+
 def _is_known_payment_agent(text: str) -> str | None:
     """Check if text matches a known PAYMENT FROM agent. Returns the column preference."""
     if not text:
         return None
     lower = text.lower()
     for agent, pref in PAYMENT_FROM_AGENTS.items():
-        if agent in lower:
+        if _agent_matches(lower, agent):
             return pref
     return None
 
@@ -228,7 +285,7 @@ def _is_transfer_from_agent(description: str) -> bool:
     if "transfer from" not in lower:
         return False
     for agent in TRANSFER_FROM_AGENTS:
-        if agent in lower:
+        if _agent_matches(lower, agent):
             return True
     return False
 
@@ -403,10 +460,17 @@ def extract_student(
     """
     all_cols = f"{description} {payer} {col_h} {col_i}"
 
-    # Priority 1: Student ID (8-digit starting with 1) from all description columns
-    search_cols = [col_h, col_i, description, payer]
-    for col in search_cols:
-        sid = _extract_student_id(col)
+    # Priority 1: Student ID (8-digit starting with 1).
+    # Reference columns (H, I) are clean — trust any 8-digit hit there.
+    # Description/payer are noisy (phone numbers, BSBs, account numbers slip
+    # through), so we only accept those if there's an explicit STUDENT/REF/ID
+    # anchor in front of the digits.
+    for col in [col_h, col_i]:
+        sid = _extract_student_id(col, trust_unanchored=True)
+        if sid:
+            return sid
+    for col in [description, payer]:
+        sid = _extract_student_id(col, trust_unanchored=False)
         if sid:
             return sid
 
