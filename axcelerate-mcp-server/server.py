@@ -4,8 +4,9 @@ Axcelerate MCP Server
 Exposes Axcelerate training management system API operations as MCP tools.
 """
 
-import json
 import os
+import sys
+from datetime import datetime
 from typing import Optional
 
 import httpx
@@ -19,6 +20,40 @@ load_dotenv()
 BASE_URL = os.getenv("AXCELERATE_BASE_URL", "")
 API_TOKEN = os.getenv("AXCELERATE_API_TOKEN", "")
 WS_TOKEN = os.getenv("AXCELERATE_WS_TOKEN", "")
+
+# Fail fast at startup with a clear message instead of letting every tool call
+# return an opaque 401. Logged to stderr so MCP clients surface it.
+_missing = [name for name, val in (
+    ("AXCELERATE_BASE_URL", BASE_URL),
+    ("AXCELERATE_API_TOKEN", API_TOKEN),
+    ("AXCELERATE_WS_TOKEN", WS_TOKEN),
+) if not val]
+if _missing:
+    print(
+        "WARNING: Axcelerate MCP server starting without required credentials: "
+        + ", ".join(_missing)
+        + ". Every tool call will fail with 401 until these are set in .env.",
+        file=sys.stderr,
+    )
+
+
+def _normalize_trans_date(value: str) -> str:
+    """Coerce a date string to MM/DD/YYYY (the Axcelerate `transDate` format).
+
+    Accepts MM/DD/YYYY (passthrough), YYYY-MM-DD, and DD/MM/YYYY-with-context.
+    Raises ValueError if the input matches none of these. The Axcelerate API
+    silently misrecords dates if you pass YYYY-MM-DD into transDate, so we
+    convert here rather than at the API boundary.
+    """
+    s = value.strip()
+    for fmt in ("%m/%d/%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(s, fmt).strftime("%m/%d/%Y")
+        except ValueError:
+            continue
+    raise ValueError(
+        f"Bad trans_date '{value}'. Use MM/DD/YYYY (Axcelerate native) or YYYY-MM-DD."
+    )
 
 # ── Async HTTP client ─────────────────────────────────────────────────────────
 
@@ -827,7 +862,9 @@ async def record_payment(
     if invoice_id:
         data["invoiceID"] = invoice_id
     if trans_date:
-        data["transDate"] = trans_date
+        # Axcelerate expects MM/DD/YYYY here; accept YYYY-MM-DD and convert so
+        # callers don't silently mis-record dates.
+        data["transDate"] = _normalize_trans_date(trans_date)
     if reference:
         data["reference"] = reference
     if description:
