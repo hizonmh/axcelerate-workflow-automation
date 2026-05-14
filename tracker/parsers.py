@@ -8,13 +8,38 @@ import pdfplumber
 from reconciler import reconcile_transaction, PAYMENT_FROM_AGENTS, TRANSFER_FROM_AGENTS
 
 # Bank account → instance mapping for CSV files (filename-derived account names).
-# Accounts not listed here default to "MAC".
+# Strict: every account that may legitimately appear in a CSV import must be
+# listed here. An unknown account raises during import rather than silently
+# routing to MAC, which previously could push a NECTECH/NECGC payment to the
+# MAC instance if a new account was added or a filename had a typo.
 BANK_ACCOUNT_INSTANCE: dict[str, str] = {
+    # MAC
+    "Adelaide": "MAC",
+    "Adelaide Prepaid": "MAC",
+    "Brisbane Cheque": "MAC",
+    "Brisbane Prepaid": "MAC",
+    "Sydney Cheque": "MAC",
+    "Sydney Prepaid": "MAC",
+    "Perth Cheque": "MAC",
+    "Perth Prepaid": "MAC",
+    # NECGC
     "GC Cheque": "NECGC",
     "GC Prepaid": "NECGC",
+    # NECTECH
     "Melbourne Cheque": "NEC",
     "Melbourne Prepaid": "NEC",
 }
+
+
+def _resolve_instance(bank_account: str, source: str) -> str:
+    """Look up the instance for a bank account, raising on unknown names."""
+    if bank_account in BANK_ACCOUNT_INSTANCE:
+        return BANK_ACCOUNT_INSTANCE[bank_account]
+    raise ValueError(
+        f"Unknown bank account '{bank_account}' in {source}. "
+        f"Add it to BANK_ACCOUNT_INSTANCE in tracker/parsers.py with the correct "
+        f"instance code (MAC, NECGC, or NEC)."
+    )
 
 # Xero Excel account mapping: Row 4 Col A value → (bank_account, instance).
 # MAC accounts use the legacy first-word-before-dash extraction and are not listed here.
@@ -196,7 +221,7 @@ def parse_combined_bank_csv(file_content: bytes | str) -> list[dict]:
 
         # Bank account from Source.Name (e.g. "Adelaide.csv" → "Adelaide")
         bank_account = re.sub(r"\.csv$", "", source_name, flags=re.IGNORECASE).strip()
-        instance = BANK_ACCOUNT_INSTANCE.get(bank_account, "MAC")
+        instance = _resolve_instance(bank_account, source="combined CSV Source.Name column")
 
         # Determine payer for dedup
         if col_e and col_e != "#NAME?":
@@ -296,7 +321,7 @@ def parse_bank_csv(file_content: bytes | str, bank_account: str = "") -> list[di
             amount=amount,
         )
 
-        instance = BANK_ACCOUNT_INSTANCE.get(bank_account, "MAC")
+        instance = _resolve_instance(bank_account, source=f"single-bank CSV (account='{bank_account}')")
 
         records.append({
             "date": date_str,
@@ -332,14 +357,17 @@ def parse_xero_excel(file_content: bytes) -> list[dict]:
 
     # Extract bank account name from row 4 (e.g. "Adelaide - 316307842" → "Adelaide")
     row4_val = ws.cell(4, 1).value
-    bank_account = ""
-    instance = "MAC"
-    if row4_val:
-        raw = str(row4_val).strip()
-        if raw in XERO_ACCOUNT_MAP:
-            bank_account, instance = XERO_ACCOUNT_MAP[raw]
-        else:
-            bank_account = raw.split(" - ")[0].strip()
+    if not row4_val:
+        raise ValueError("Xero file is missing the bank account name in row 4 column A")
+    raw = str(row4_val).strip()
+    if raw in XERO_ACCOUNT_MAP:
+        bank_account, instance = XERO_ACCOUNT_MAP[raw]
+    else:
+        # Legacy MAC-account convention: take the prefix before " - " and look
+        # it up strictly. An unrecognised name now raises instead of silently
+        # routing to MAC.
+        bank_account = raw.split(" - ")[0].strip()
+        instance = _resolve_instance(bank_account, source=f"Xero row 4 col A = '{raw}'")
 
     records = []
     data_started = False
