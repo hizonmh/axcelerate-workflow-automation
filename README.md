@@ -81,7 +81,7 @@ streamlit run app.py
 ```
 
 Workflow:
-1. **Import** — upload bank CSVs, Xero Excel exports, or Ezidebit PDF reports. Parsers auto-detect the source and tag each row with its instance (MAC / NECGC / NEC / EZIDEBIT).
+1. **Import** — upload bank CSVs, Xero Excel exports, or Ezidebit PDF reports. Parsers auto-detect the source and tag each row with its instance (MAC / NECGC / NEC / EZIDEBIT). Ezidebit imports only include "Paid" rows that have a settlement date (pending/failed rows are excluded).
 2. **Review** — filter, search, and bulk-edit student/status/payment method across seven tabs (Received + Spent for each instance, plus MAC-EZIDEBIT for direct debits).
 3. **Mark for upload** — set status to `OK to Upload` for verified rows.
 4. **Upload** — use the per-instance buttons in the "Upload to Axcelerate" expander, which run `bulk_payment.py` with the correct `--instance` flag.
